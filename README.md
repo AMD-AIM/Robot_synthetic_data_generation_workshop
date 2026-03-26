@@ -46,7 +46,7 @@ robot_synthetic_data_generation_workshop/
 
 ### Hardware
 
-- **GPU**: ≥4 GB VRAM (tested: NV RTX 4090, AMD MI300)
+- **GPU**: ≥4 GB VRAM (tested: AMD MI300)
 - **Display**: Xvfb on headless Linux (auto-started by scripts)
 
 ### Docker (recommended)
