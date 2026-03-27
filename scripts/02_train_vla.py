@@ -20,6 +20,12 @@ from pathlib import Path
 
 import torch
 
+# Workaround: AOTriton SDPA hangs on AMD MI300 (ROCm 6.4).
+# Disable flash/mem_efficient SDPA backends; fall back to math kernel.
+if hasattr(torch.backends, "cuda") and hasattr(torch.backends.cuda, "enable_flash_sdp"):
+    torch.backends.cuda.enable_flash_sdp(False)
+    torch.backends.cuda.enable_mem_efficient_sdp(False)
+
 
 def make_delta_timestamps(delta_indices, fps: int):
     if delta_indices is None:
