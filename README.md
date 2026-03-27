@@ -5,28 +5,29 @@ End-to-end pipeline for robot manipulation: **Synthetic Data Generation → VLA 
 ## Pipeline Overview
 
 ```
-┌─────────────────────┐     ┌─────────────────────┐     ┌─────────────────────┐
-│  01_gen_data.py      │     │  02_train_vla.py     │     │  03_eval.py          │
-│                      │     │                      │     │                      │
-│  Genesis simulation  │────▶│  SmolVLA fine-tune   │────▶│  Closed-loop eval    │
-│  IK trajectory plan  │     │  on LeRobot dataset  │     │  in Genesis sim      │
-│  LeRobot dataset out │     │  HF checkpoint out   │     │  success rate + video│
-└─────────────────────┘     └─────────────────────┘     └─────────────────────┘
-     Franka 7-DOF                lerobot/smolvla_base         render → VLA → PD
-     pick red cube               freeze vision encoder        action chunking
-     2 cameras (up/side)         train expert + state_proj    randomized cube pos
+┌──────────────────────────┐     ┌─────────────────────┐     ┌─────────────────────┐
+│ 01_gen_data.py (default) │     │  02_train_vla.py     │     │  03_eval.py          │
+│   flat plane + cube      │     │                      │     │                      │
+│ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─│────▶│  SmolVLA fine-tune   │────▶│  Closed-loop eval    │
+│ 02_gen_data_custom_scene │     │  on LeRobot dataset  │     │  in Genesis sim      │
+│   kitchen GLB + anchors  │     │  HF checkpoint out   │     │  success rate + video│
+└──────────────────────────┘     └─────────────────────┘     └─────────────────────┘
+     Franka 7-DOF                     lerobot/smolvla_base       render → VLA → PD
+     pick red cube                    freeze vision encoder      action chunking
+     2 cameras (up/side)              train expert + state_proj  randomized cube pos
 ```
 
 ## File Structure
 
 ```
 robot_synthetic_data_generation_workshop/
-├── README.md               ← this file
-├── run_pipeline.sh         ← one-click end-to-end pipeline
+├── README.md                       ← this file
+├── run_pipeline.sh                 ← one-click end-to-end pipeline
 └── scripts/
-    ├── 01_gen_data.py      ← Step 1: Franka pick-cube data generation (Genesis)
-    ├── 02_train_vla.py     ← Step 2: SmolVLA post-training on collected data
-    ├── 03_eval.py          ← Step 3: closed-loop simulation evaluation
+    ├── 01_gen_data.py              ← Step 1a: data gen — default flat scene
+    ├── 02_gen_data_custom_scene.py ← Step 1b: data gen — custom 3D scene (kitchen etc.)
+    ├── 02_train_vla.py             ← Step 2:  SmolVLA post-training on collected data
+    ├── 03_eval.py                  ← Step 3:  closed-loop simulation evaluation
 ```
 
 
@@ -96,6 +97,42 @@ Key flags:
 - `--add-goal`: append `cube_xy` to state (9D → 11D, for V5 goal-conditioned experiments)
 - `--no-videos`: store images as PNG instead of MP4 (faster on mounted volumes)
 - `--no-bbox-detection`: AMD GPU workaround
+
+#### Step 1b: Custom Scene Data Generation (optional)
+
+Generate pick-cube data in a **custom 3D scene** (e.g. rustic kitchen with GLB meshes).
+Uses the scene infrastructure from `lerobot_from_zero_to_expert/20_worldlab`.
+
+```bash
+python scripts/02_gen_data_custom_scene.py \
+  --worldlab-dir /workspace/lfzte/20_worldlab \
+  --n-episodes 100 \
+  --repo-id local/kitchen-pick \
+  --save /output \
+  --seed 42
+```
+
+- **Scene**: `rustic_kitchen` with dual-mesh (HQ visual + collider physics)
+- **Anchor**: `floor_origin` (Franka at world origin on floor, simplest setup)
+- **Randomization**: cube `(dx, dy)` randomized in robot-local frame, auto-transformed by `yaw`
+- **Output**: same LeRobot format as `01_gen_data.py` — downstream training / eval scripts work unchanged
+
+Key flags:
+- `--scene <name>`: load a different scene config (`scenes/<name>.json`)
+- `--anchor <name>`: robot placement preset (`floor_origin`, `back_counter`, etc.)
+- `--mesh-file rustic_kitchen_collider.glb`: collider-only mesh for faster rendering (~2x)
+- `--no-scene-mesh`: fall back to flat plane (equivalent to `01_gen_data.py`)
+
+**Anchor presets** (defined in `20_worldlab/scenes/rustic_kitchen.json`):
+
+| Anchor | Position | Description |
+|---|---|---|
+| `floor_origin` | `(0, 0)` yaw=0° | Franka on floor at origin, simplest pick setup |
+| `left_counter` | `(0.35, -0.85)` yaw=0° | Left countertop (sink side) |
+| `back_counter` | `(-0.95, -0.50)` yaw=180° | Back countertop with pedestal, custom cameras |
+
+**Prerequisites**: `20_worldlab` assets must be downloaded (see `20_worldlab/scripts/00_download_kitchen.py`).
+Set `--worldlab-dir` to the `20_worldlab` directory path, or export `WORLDLAB_DIR` env var.
 
 #### Step 2: SmolVLA Post-Training
 
@@ -187,9 +224,12 @@ Genesis Scene                    LeRobot Dataset                SmolVLA
 │ Physics sim  │                │ action [9D]   │              │ Expert       │
 │ (Genesis)    │                │ task (text)   │              │ Layers       │
 └──────────────┘                └──────────────┘              │ (trainable)  │
+  ▲ scene source:                                             │              │
+  │ (a) flat plane (01)                                       │ → action     │
+  │ (b) kitchen GLB (02)         same LeRobot format          │   chunk [50] │
                                                               │              │
-Eval Loop:                                                    │ → action     │
-  render ─────────────────────────────────── inference ───────│   chunk [50] │
+Eval Loop:                                                    │              │
+  render ─────────────────────────────────── inference ───────│              │
   observe state ──────────────────────────── predict ─────────│              │
   execute action[0] ──────── PD control ──── scene.step()     └──────────────┘
 ```
