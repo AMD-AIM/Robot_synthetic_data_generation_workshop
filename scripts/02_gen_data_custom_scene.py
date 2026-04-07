@@ -2,13 +2,13 @@
 Custom-scene Franka pick-cube data generation for LeRobot.
 
 Extends 01_gen_data.py (default flat scene) with support for custom 3D
-scenes loaded from 20_worldlab scene configs (JSON + GLB meshes).
+scenes loaded from scene configs (JSON + GLB meshes).
 
 Default: rustic_kitchen scene with floor_origin anchor.
 
 Prerequisites:
     pip install lerobot
-    20_worldlab assets downloaded (see 20_worldlab/scripts/00_download_kitchen.py)
+    Kitchen assets downloaded: python scripts/00_download_kitchen.py
 
 Usage:
     # Kitchen scene, floor_origin, 10 episodes
@@ -27,28 +27,18 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import random
 import sys
-import time
 from pathlib import Path
 
 import numpy as np
 
 # ---------------------------------------------------------------------------
-# Resolve 20_worldlab imports
+# Ensure sibling modules are importable
 # ---------------------------------------------------------------------------
 _SCRIPT_DIR = Path(__file__).resolve().parent
-_DEFAULT_WORLDLAB = _SCRIPT_DIR.parents[2] / "lerobot_from_zero_to_expert" / "20_worldlab"
-
-def _setup_worldlab_path(worldlab_dir: Path):
-    scripts_dir = worldlab_dir / "scripts"
-    if not scripts_dir.exists():
-        print(f"[error] worldlab scripts not found: {scripts_dir}")
-        print(f"[hint] set --worldlab-dir or WORLDLAB_DIR env var")
-        sys.exit(1)
-    if str(scripts_dir) not in sys.path:
-        sys.path.insert(0, str(scripts_dir))
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
 
 
 # ---------------------------------------------------------------------------
@@ -57,10 +47,6 @@ def _setup_worldlab_path(worldlab_dir: Path):
 def main():
     ap = argparse.ArgumentParser(
         description="Custom-scene Franka pick-cube data generation (LeRobot)")
-
-    ap.add_argument("--worldlab-dir", type=Path,
-                    default=Path(os.environ.get("WORLDLAB_DIR", str(_DEFAULT_WORLDLAB))),
-                    help="Path to 20_worldlab directory")
 
     # Dataset args (same as 01_gen_data.py)
     ap.add_argument("--n-episodes", type=int, default=10)
@@ -89,11 +75,6 @@ def main():
     ap.add_argument("--success-sustain-frames", type=int, default=8)
     ap.add_argument("--success-final-delta", type=float, default=0.01)
 
-    # Scene args — these are parsed by add_pick_args from pick_common
-    # We do a two-pass parse: first grab worldlab-dir, then add scene args
-    pre_args, remaining = ap.parse_known_args()
-
-    _setup_worldlab_path(pre_args.worldlab_dir)
     from pick_common import add_pick_args, build_scene, CUBE_SIZE
     from scene_placement import (
         HAND_OFFSET, HOVER_DZ, LIFT_DZ, CUBE_RANGE_X, CUBE_RANGE_Y,

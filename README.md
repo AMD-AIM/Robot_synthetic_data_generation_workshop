@@ -23,11 +23,18 @@ End-to-end pipeline for robot manipulation: **Synthetic Data Generation → VLA 
 robot_synthetic_data_generation_workshop/
 ├── README.md                       ← this file
 ├── run_pipeline.sh                 ← one-click end-to-end pipeline
+├── scenes/
+│   └── rustic_kitchen.json         ← kitchen scene config (anchors, mesh refs)
 └── scripts/
+    ├── 00_download_kitchen.py      ← download kitchen GLB/PLY assets
     ├── 01_gen_data.py              ← Step 1a: data gen — default flat scene
     ├── 02_gen_data_custom_scene.py ← Step 1b: data gen — custom 3D scene (kitchen etc.)
     ├── 02_train_vla.py             ← Step 2:  SmolVLA post-training on collected data
-    ├── 03_eval.py                  ← Step 3:  closed-loop simulation evaluation
+    ├── 03_eval.py                  ← Step 3a: closed-loop eval (flat scene)
+    ├── 04_eval_custom_scene.py     ← Step 3b: closed-loop eval (custom scene)
+    ├── genesis_scene_utils.py      ← Genesis mesh/robot/render utilities
+    ├── pick_common.py              ← scene-agnostic scene builder for pick tasks
+    └── scene_placement.py          ← robot-local workspace placement math
 ```
 
 
@@ -101,11 +108,18 @@ Key flags:
 #### Step 1b: Custom Scene Data Generation (optional)
 
 Generate pick-cube data in a **custom 3D scene** (e.g. rustic kitchen with GLB meshes).
-Uses the scene infrastructure from `lerobot_from_zero_to_expert/20_worldlab`.
+
+**Prerequisites**: Download the kitchen mesh assets first:
+
+```bash
+python scripts/00_download_kitchen.py             # downloads GLB meshes to assets/rustic_kitchen/
+python scripts/00_download_kitchen.py --mesh-only  # skip large Gaussian Splat PLY (~250 MB)
+```
+
+Then generate data:
 
 ```bash
 python scripts/02_gen_data_custom_scene.py \
-  --worldlab-dir /workspace/lfzte/20_worldlab \
   --n-episodes 100 \
   --repo-id local/kitchen-pick \
   --save /output \
@@ -123,16 +137,13 @@ Key flags:
 - `--mesh-file rustic_kitchen_collider.glb`: collider-only mesh for faster rendering (~2x)
 - `--no-scene-mesh`: fall back to flat plane (equivalent to `01_gen_data.py`)
 
-**Anchor presets** (defined in `20_worldlab/scenes/rustic_kitchen.json`):
+**Anchor presets** (defined in `scenes/rustic_kitchen.json`):
 
 | Anchor | Position | Description |
 |---|---|---|
 | `floor_origin` | `(0, 0)` yaw=0° | Franka on floor at origin, simplest pick setup |
 | `left_counter` | `(0.35, -0.85)` yaw=0° | Left countertop (sink side) |
 | `back_counter` | `(-0.95, -0.50)` yaw=180° | Back countertop with pedestal, custom cameras |
-
-**Prerequisites**: `20_worldlab` assets must be downloaded (see `20_worldlab/scripts/00_download_kitchen.py`).
-Set `--worldlab-dir` to the `20_worldlab` directory path, or export `WORLDLAB_DIR` env var.
 
 #### Step 2: SmolVLA Post-Training
 

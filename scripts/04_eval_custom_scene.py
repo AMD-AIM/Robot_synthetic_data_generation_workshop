@@ -2,13 +2,12 @@
 Closed-loop SmolVLA evaluation in a custom 3D scene (Genesis).
 
 Extends 03_eval.py (flat-plane scene) with support for custom scenes
-loaded via 20_worldlab/scripts/pick_common.build_scene().
+loaded via pick_common.build_scene().
 
 Default: rustic_kitchen scene with floor_origin anchor.
 
 Usage:
     python 04_eval_custom_scene.py \
-        --worldlab-dir /workspace/lfzte/20_worldlab \
         --policy-type smolvla \
         --checkpoint /output/outputs/kitchen_smolvla/final \
         --dataset-id local/kitchen-pick \
@@ -21,7 +20,6 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import os
 import random
 import subprocess
 import sys
@@ -34,19 +32,11 @@ import torch.nn as nn
 
 
 # ---------------------------------------------------------------------------
-# Resolve 20_worldlab imports
+# Ensure sibling modules are importable
 # ---------------------------------------------------------------------------
 _SCRIPT_DIR = Path(__file__).resolve().parent
-_DEFAULT_WORLDLAB = _SCRIPT_DIR.parents[2] / "lerobot_from_zero_to_expert" / "20_worldlab"
-
-def _setup_worldlab_path(worldlab_dir: Path):
-    scripts_dir = worldlab_dir / "scripts"
-    if not scripts_dir.exists():
-        print(f"[error] worldlab scripts not found: {scripts_dir}")
-        print(f"[hint] set --worldlab-dir or WORLDLAB_DIR env var")
-        sys.exit(1)
-    if str(scripts_dir) not in sys.path:
-        sys.path.insert(0, str(scripts_dir))
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
 
 
 # ---------------------------------------------------------------------------
@@ -120,9 +110,6 @@ def main():
     ap = argparse.ArgumentParser(
         description="Custom-scene closed-loop eval (SmolVLA / ACT / BC)")
 
-    ap.add_argument("--worldlab-dir", type=Path,
-                    default=Path(os.environ.get("WORLDLAB_DIR", str(_DEFAULT_WORLDLAB))))
-
     # Policy args
     ap.add_argument("--policy-type", default="smolvla",
                     choices=["bc", "act", "smolvla"])
@@ -148,10 +135,6 @@ def main():
     ap.add_argument("--save", default="/output/kitchen_eval")
     ap.add_argument("--record-video", action="store_true")
 
-    # Two-pass parse: grab worldlab-dir first, then add scene args
-    pre_args, remaining = ap.parse_known_args()
-
-    _setup_worldlab_path(pre_args.worldlab_dir)
     from pick_common import add_pick_args, build_scene, CUBE_SIZE
     from scene_placement import (
         CUBE_RANGE_X, CUBE_RANGE_Y, to_world,
