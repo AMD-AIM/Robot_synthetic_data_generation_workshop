@@ -1,8 +1,8 @@
+[English](README.md) | [中文](README-cn.md)
+
 # Robot Synthetic Data Generation Workshop
 
-End-to-end pipeline for robot manipulation: **Synthetic Data Generation → VLA Training → Simulation Evaluation**.
-
-## Pipeline Overview
+End-to-end pipeline for robot manipulation on **AMD MI300X (ROCm)**: **Synthetic Data Generation → VLA Training → Simulation Evaluation**.
 
 ```
 ┌──────────────────────────┐     ┌─────────────────────┐     ┌─────────────────────┐
@@ -17,194 +17,204 @@ End-to-end pipeline for robot manipulation: **Synthetic Data Generation → VLA 
      2 cameras (up/side)              train expert + state_proj  randomized cube pos
 ```
 
+---
+
+## Quick Start
+
+The entire workshop is driven by `workshop_pipeline.ipynb`, running inside a Docker container on a remote AMD MI300X GPU node.
+
+The notebook ships with pre-generated visualizations (in `images/`), so you can read through the pipeline even without executing it.
+
+### Step 1 — SSH into the GPU node
+
+```bash
+ssh -A <your-user>@<mi300x-node>
+```
+
+### Step 2 — Clone the repository
+
+```bash
+git clone git@github.com:<org>/Robot_synthetic_data_generation_workshop.git
+cd Robot_synthetic_data_generation_workshop
+```
+
+### Step 3 — Launch a Docker container
+
+```bash
+docker run --rm -it \
+  --device=/dev/kfd --device=/dev/dri --group-add video --ipc=host \
+  -e PYOPENGL_PLATFORM=egl \
+  -e HSA_OVERRIDE_GFX_VERSION=9.4.2 \
+  -v $(pwd):/workspace/workshop \
+  -v /tmp/workshop_output:/output \
+  -v ~/.cache/huggingface:/root/.cache/huggingface \
+  -w /workspace/workshop \
+  <genesis-amd-docker-image> \
+  bash
+```
+
+> The `-it` flag gives you an interactive shell. All subsequent steps run inside this container.
+
+### Step 4 — Install dependencies (inside the container)
+
+```bash
+# Python packages
+pip install -q genesis-world lerobot transformers accelerate safetensors \
+  matplotlib Pillow jupyter ipykernel
+
+# Fix numpy / scikit-image ABI mismatch (Genesis requires numpy==2.1.2)
+pip install --force-reinstall --no-cache-dir -q "scikit-image>=0.22" "numpy==2.1.2"
+
+# System packages for headless rendering and video encoding
+apt-get update -qq && apt-get install -y -qq xvfb ffmpeg > /dev/null 2>&1
+
+# Apply the Genesis ROCm patch (see "ROCm Adaptations" section below)
+# fix_and_run.sh Step 3 handles this automatically
+```
+
+> You can also run `bash fix_and_run.sh` to do all of the above in one shot and execute the notebook automatically. However, we recommend launching Jupyter manually and running cells one by one to understand the pipeline.
+
+### Step 5 — Start Jupyter Notebook
+
+```bash
+jupyter notebook --ip=0.0.0.0 --port=8888 --no-browser --allow-root
+```
+
+Open an SSH tunnel from your local machine:
+
+```bash
+ssh -L 8888:localhost:8888 <your-user>@<mi300x-node>
+```
+
+Then open `http://localhost:8888` in your browser and navigate to `workshop_pipeline.ipynb`. Run cells in order.
+
+---
+
+## Notebook Overview
+
+| Section | Content | Output |
+|---------|---------|--------|
+| **0. Environment Setup** | GPU detection, dependency check, kitchen asset download | Environment ready |
+| **1. Data Generation** | Flat-scene + kitchen-scene IK trajectory generation | LeRobot dataset + visualizations |
+| **2. VLA Training** | SmolVLA post-training (frozen vision encoder) | Checkpoint + loss curve |
+| **3. Evaluation** | Closed-loop sim eval (render → infer → execute → physics) | Success rate + videos |
+| **4. Summary** | Artifact collection and inline display | PNG / MP4 / JSON |
+
+Each section includes:
+- **Background** — why this step matters and the underlying technical principles
+- **Executable code** — run cells directly
+- **Embedded visualizations** — pre-generated images plus live matplotlib plots at runtime
+
+---
+
 ## File Structure
 
 ```
 robot_synthetic_data_generation_workshop/
-├── README.md                       ← this file
-├── run_pipeline.sh                 ← one-click end-to-end pipeline
+├── README.md                        ← this file (English)
+├── README-cn.md                     ← Chinese version
+├── workshop_pipeline.ipynb          ← ★ Jupyter Notebook (workshop main body)
+├── fix_and_run.sh                   ← one-shot: install deps + ROCm patches + run notebook
+├── run_pipeline.sh                  ← shell-only pipeline (no notebook)
+├── images/                          ← pre-generated visualizations (referenced by notebook)
+│   ├── ep0_camera_views.png
+│   ├── ep0_joint_trajectory.png
+│   ├── cube_scatter_flat.png
+│   └── cube_scatter_kitchen.png
 ├── scenes/
-│   └── rustic_kitchen.json         ← kitchen scene config (anchors, mesh refs)
+│   └── rustic_kitchen.json          ← kitchen scene config (anchors, mesh refs)
 └── scripts/
-    ├── 00_download_kitchen.py      ← download kitchen GLB/PLY assets
-    ├── 01_gen_data.py              ← Step 1a: data gen — default flat scene
-    ├── 02_gen_data_custom_scene.py ← Step 1b: data gen — custom 3D scene (kitchen etc.)
-    ├── 02_train_vla.py             ← Step 2:  SmolVLA post-training on collected data
-    ├── 03_eval.py                  ← Step 3a: closed-loop eval (flat scene)
-    ├── 04_eval_custom_scene.py     ← Step 3b: closed-loop eval (custom scene)
-    ├── genesis_scene_utils.py      ← Genesis mesh/robot/render utilities
-    ├── pick_common.py              ← scene-agnostic scene builder for pick tasks
-    └── scene_placement.py          ← robot-local workspace placement math
+    ├── 00_download_kitchen.py       ← download kitchen GLB assets
+    ├── 01_gen_data.py               ← data generation (flat scene)
+    ├── 02_gen_data_custom_scene.py  ← data generation (custom 3D scene)
+    ├── 02_train_vla.py              ← SmolVLA post-training
+    ├── 03_eval.py                   ← closed-loop eval (flat scene)
+    ├── 04_eval_custom_scene.py      ← closed-loop eval (custom scene)
+    ├── genesis_scene_utils.py       ← Genesis utility functions
+    ├── pick_common.py               ← scene-agnostic pick task builder
+    └── scene_placement.py           ← robot-local coordinate utilities
 ```
 
+---
 
-## Prerequisites
-
-### Software
+## Dependencies
 
 | Package | Version | Purpose |
 |---|---|---|
-| `genesis-world` | ≥0.4.1 | Physics simulation + rendering |
+| `genesis-world` | ≥0.4.1 | Physics simulation + rendering (Taichi backend, ROCm native) |
 | `lerobot` | ≥0.4.4 | Dataset format + SmolVLA model |
-| `torch` | ≥2.1 | Training & inference |
+| `torch` | ≥2.1 (ROCm) | Training and inference |
 | `transformers` | ≥4.40 | SmolVLA backbone (Idefics3) |
-| `accelerate` | latest | HF model loading |
-| `safetensors` | latest | Model checkpoint I/O |
-| `matplotlib` | ≥3.5 | Loss curve plot (optional) |
+| `accelerate` | latest | HuggingFace model loading |
+| `numpy` | ==2.1.2 | Required by Genesis; must match scikit-image C extension ABI |
+| `scikit-image` | ≥0.22 | Must be recompiled against numpy==2.1.2 |
+| `xvfb` | system | Headless rendering (apt-get install) |
+| `ffmpeg` | system | Video encoding (apt-get install) |
 
-### Hardware
+**Hardware**: AMD Instinct MI300X, ROCm 6.x, ≥4 GB VRAM
 
-- **GPU**: ≥4 GB VRAM (tested: AMD MI300)
-- **Display**: Xvfb on headless Linux (auto-started by scripts)
+---
 
-### Docker (recommended)
+## ROCm Adaptations
 
-```bash
-docker run --rm \
-  --device=/dev/kfd --device=/dev/dri --group-add video --ipc=host \
-  -e PYOPENGL_PLATFORM=egl \
-  -v $(pwd):/workspace/workshop \
-  -v ~/outputs:/output \
-  -v ~/.hf_cache:/root/.cache/huggingface \
-  -w /workspace/workshop \
-  <genesis-lerobot-image> \
-  bash run_pipeline.sh
+All fixes below are handled automatically by `fix_and_run.sh`. You only need to apply them manually if you set up the environment yourself.
+
+### 1. Genesis `cuda.bindings` Patch
+
+Genesis calls `from cuda.bindings import runtime` to query GPU shared memory size. This module does not exist on ROCm. The patch wraps the call in a try-except and falls back to the MI300X LDS size (64 KB):
+
+```python
+# genesis/engine/solvers/rigid/rigid_solver.py
+try:
+    from cuda.bindings import runtime
+    _, max_shared_mem = runtime.cudaDeviceGetAttribute(...)
+    max_shared_mem /= 1024.0
+except (ImportError, Exception):
+    max_shared_mem = 64.0  # MI300X LDS fallback
 ```
 
-## Quick Start
+### 2. numpy / scikit-image ABI Fix
 
-### One-click pipeline
-
-```bash
-bash run_pipeline.sh              # default: 100 episodes, 2000 training steps
-bash run_pipeline.sh 50 1000      # 50 episodes, 1000 steps (faster for testing)
-```
-
-### Step-by-step
-
-#### Step 1: Synthetic Data Generation
-
-Generate Franka pick-cube trajectories with IK planning in Genesis:
+The base Docker image may ship scikit-image compiled against a different numpy version, causing `ValueError: numpy.dtype size changed` at runtime. Force-reinstalling both packages together recompiles the C extensions:
 
 ```bash
-python scripts/01_gen_data.py \
-  --n-episodes 100 \
-  --repo-id local/franka-workshop \
-  --save /output \
-  --seed 42
+pip install --force-reinstall --no-cache-dir "scikit-image>=0.22" "numpy==2.1.2"
 ```
 
-- **Robot**: Franka Panda 7-DOF
-- **Task**: Pick up a red cube from randomized XY positions
-- **Trajectory**: HOME → hover → descend → grasp → lift (IK-planned)
-- **Output**: LeRobot dataset with `observation.state` (9D joints), `action` (9D), `observation.images.up/side` (640×480)
-- **Success rate**: ~100% (expert IK trajectories)
-
-Key flags:
-- `--add-goal`: append `cube_xy` to state (9D → 11D, for V5 goal-conditioned experiments)
-- `--no-videos`: store images as PNG instead of MP4 (faster on mounted volumes)
-- `--no-bbox-detection`: AMD GPU workaround
-
-#### Step 1b: Custom Scene Data Generation (optional)
-
-Generate pick-cube data in a **custom 3D scene** (e.g. rustic kitchen with GLB meshes).
-
-**Prerequisites**: Download the kitchen mesh assets first:
+### 3. ROCm-specific Script Flags
 
 ```bash
-python scripts/00_download_kitchen.py             # downloads GLB meshes to assets/rustic_kitchen/
-python scripts/00_download_kitchen.py --mesh-only  # skip large Gaussian Splat PLY (~250 MB)
+python scripts/01_gen_data.py --no-bbox-detection --no-videos ...
+python scripts/02_train_vla.py --num-workers 0 ...
+python scripts/03_eval.py --no-bbox-detection ...
 ```
 
-Then generate data:
+- `--no-bbox-detection` — bypass bounding box detection compatibility issues on AMD GPUs
+- `--num-workers 0` — avoid torchcodec multi-process decoding crashes on ROCm
+- `--no-videos` — store images as PNG instead of MP4 (faster on mounted volumes)
 
-```bash
-python scripts/02_gen_data_custom_scene.py \
-  --n-episodes 100 \
-  --repo-id local/kitchen-pick \
-  --save /output \
-  --seed 42
-```
+### 4. SmolVLA Compatibility
 
-- **Scene**: `rustic_kitchen` with dual-mesh (HQ visual + collider physics)
-- **Anchor**: `floor_origin` (Franka at world origin on floor, simplest setup)
-- **Randomization**: cube `(dx, dy)` randomized in robot-local frame, auto-transformed by `yaw`
-- **Output**: same LeRobot format as `01_gen_data.py` — downstream training / eval scripts work unchanged
+`lerobot>=0.5.0` may have a `dataclass` field ordering issue with `SmolVLAConfig`. If training fails with `TypeError: non-default argument follows default argument`, use `lerobot==0.4.4` or check the [LeRobot releases](https://github.com/huggingface/lerobot/releases).
 
-Key flags:
-- `--scene <name>`: load a different scene config (`scenes/<name>.json`)
-- `--anchor <name>`: robot placement preset (`floor_origin`, `back_counter`, etc.)
-- `--mesh-file rustic_kitchen_collider.glb`: collider-only mesh for faster rendering (~2x)
-- `--no-scene-mesh`: fall back to flat plane (equivalent to `01_gen_data.py`)
+---
 
-**Anchor presets** (defined in `scenes/rustic_kitchen.json`):
+## Reference Results
 
-| Anchor | Position | Description |
+Verified on AMD MI300X (ROCm 6.x).
+
+### Data Generation
+
+| Scene | Episodes | Success Rate |
 |---|---|---|
-| `floor_origin` | `(0, 0)` yaw=0° | Franka on floor at origin, simplest pick setup |
-| `left_counter` | `(0.35, -0.85)` yaw=0° | Left countertop (sink side) |
-| `back_counter` | `(-0.95, -0.50)` yaw=180° | Back countertop with pedestal, custom cameras |
+| Flat (default) | 10 | **100%** |
+| Kitchen (custom) | 10 | **100%** |
 
-#### Step 2: SmolVLA Post-Training
+| Flat Scene | Kitchen Scene |
+|:---:|:---:|
+| ![flat](./images/cube_scatter_flat.png) | ![kitchen](./images/cube_scatter_kitchen.png) |
 
-Fine-tune `lerobot/smolvla_base` on the collected dataset:
-
-```bash
-python scripts/02_train_vla.py \
-  --dataset-id local/franka-workshop \
-  --n-steps 2000 \
-  --batch-size 4 \
-  --num-workers 0 \
-  --save-dir /output/outputs/workshop_smolvla
-```
-
-- **Base model**: `lerobot/smolvla_base` (~450M params)
-- **Training**: freeze vision encoder, train expert layers + state projection only
-- **Config**: `chunk_size=50`, `n_action_steps=50`, AdamW optimizer
-- **Output**: HF-format checkpoint at `<save-dir>/final/`
-
-Key flags:
-- `--num-workers 0`: recommended to avoid video decoder crashes on ROCm
-
-#### Step 3: Simulation Evaluation
-
-Closed-loop evaluation: render → SmolVLA → execute action → repeat:
-
-```bash
-# Unseen positions (OOD test)
-python scripts/03_eval.py \
-  --policy-type smolvla \
-  --checkpoint /output/outputs/workshop_smolvla/final \
-  --dataset-id local/franka-workshop \
-  --n-episodes 10 --max-steps 150 --seed 99 \
-  --record-video \
-  --save /output/eval_unseen
-
-# Training positions (IID test)
-python scripts/03_eval.py \
-  --policy-type smolvla \
-  --checkpoint /output/outputs/workshop_smolvla/final \
-  --dataset-id local/franka-workshop \
-  --n-episodes 10 --max-steps 150 --seed 42 \
-  --record-video \
-  --save /output/eval_train
-```
-
-- **Loop**: at each step, render up+side cameras → SmolVLA inference → PD control
-- **Success**: cube lifted ≥2cm and sustained for ≥8 frames
-- **Output**: `eval_summary.json` + per-episode MP4 videos (with `--record-video`)
-
-Key flags:
-- `--record-video`: save side/up camera MP4 per episode
-- `--action-horizon N`: number of actions to execute before re-planning (default 1)
-- `--no-bbox-detection`: AMD GPU workaround
-
-
-## Results
-
-Verified on **AMD MI300** (ROCm 6.4.3).
-
-### Training
+### Training (reference: 100 episodes)
 
 | Metric | Value |
 |---|---|
@@ -214,14 +224,14 @@ Verified on **AMD MI300** (ROCm 6.4.3).
 | Wall time | ~78 min |
 | Peak VRAM | 2.2 GB |
 
-### Evaluation
+### Evaluation (reference: 100 episodes)
 
-| Eval set | Success rate |
+| Eval Set | Success Rate |
 |---|---|
 | Unseen positions (seed=99) | **4/10 = 40%** |
 | Training positions (seed=42) | **5/10 = 50%** |
 
-![image](./images/cube_xy_scatter.png) 
+---
 
 ## Data Flow
 
@@ -245,17 +255,12 @@ Eval Loop:                                                    │              �
   execute action[0] ──────── PD control ──── scene.step()     └──────────────┘
 ```
 
-## AMD MI300 Notes
+---
 
-When running on AMD MI300 (ROCm), additional flags are required:
+## References
 
-```bash
-python scripts/01_gen_data.py --no-bbox-detection --no-videos ...
-python scripts/02_train_vla.py --num-workers 0 ...
-python scripts/03_eval.py --no-bbox-detection ...
-```
-
-Also install missing dependencies inside the Docker container:
-```bash
-pip install transformers accelerate
-```
+- [LeRobot](https://github.com/huggingface/lerobot) — Robot learning framework (dataset + policies)
+- [Genesis](https://genesis-embodied-ai.github.io/) — GPU-accelerated physics simulation (ROCm native via Taichi)
+- [SmolVLA](https://huggingface.co/blog/smolvla) — Vision-Language-Action model
+- [World Labs Marble](https://marble.worldlabs.ai/) — 3D scene generation for custom environments
+- [AMD ROCm Documentation](https://rocm.docs.amd.com/)
