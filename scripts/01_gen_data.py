@@ -108,6 +108,33 @@ def main():
     ap.add_argument("--success-sustain-frames", type=int, default=8)
     ap.add_argument("--success-final-delta", type=float, default=0.01)
     ap.add_argument("--task", default="Pick up the cube.")
+    ap.add_argument(
+        "--camera-layout",
+        type=str,
+        default="up_side",
+        choices=["up_side", "up_wrist"],
+        help="Camera layout: fixed top-down+side or top-down+wrist(camera attached to hand link).",
+    )
+    ap.add_argument("--wrist-cam-pos-x", type=float, default=0.08,
+                    help="Wrist camera offset x in hand-link frame (meters)")
+    ap.add_argument("--wrist-cam-pos-y", type=float, default=0.00,
+                    help="Wrist camera offset y in hand-link frame (meters)")
+    ap.add_argument("--wrist-cam-pos-z", type=float, default=0.06,
+                    help="Wrist camera offset z in hand-link frame (meters)")
+    ap.add_argument("--wrist-cam-lookat-x", type=float, default=0.00,
+                    help="Wrist camera lookat x in hand-link frame (meters)")
+    ap.add_argument("--wrist-cam-lookat-y", type=float, default=0.00,
+                    help="Wrist camera lookat y in hand-link frame (meters)")
+    ap.add_argument("--wrist-cam-lookat-z", type=float, default=0.00,
+                    help="Wrist camera lookat z in hand-link frame (meters)")
+    ap.add_argument("--wrist-cam-up-x", type=float, default=0.0,
+                    help="Wrist camera up-vector x in hand-link frame")
+    ap.add_argument("--wrist-cam-up-y", type=float, default=0.0,
+                    help="Wrist camera up-vector y in hand-link frame")
+    ap.add_argument("--wrist-cam-up-z", type=float, default=1.0,
+                    help="Wrist camera up-vector z in hand-link frame")
+    ap.add_argument("--wrist-cam-fov", type=float, default=65.0,
+                    help="Wrist camera field-of-view in degrees")
     ap.add_argument("--add-phase", action="store_true",
                     help="Append normalized time t/T to observation.state (9D→10D)")
     ap.add_argument("--add-goal", action="store_true",
@@ -121,6 +148,7 @@ def main():
     ensure_display()
     import genesis as gs
     import torch
+    from genesis.utils.geom import pos_lookat_up_to_T
 
     gs.init(backend=(gs.cpu if args.cpu else gs.gpu), logging_level="warning")
 
@@ -148,10 +176,20 @@ def main():
         res=(640, 480), pos=(0.55, 0.55, 0.55),
         lookat=(0.55, 0.0, 0.10), fov=45, GUI=False,
     )
-    cam_side = scene.add_camera(
-        res=(640, 480), pos=(0.55, -0.55, cube_z + 0.25),
-        lookat=(0.55, 0.0, cube_z + 0.10), fov=50, GUI=False,
-    )
+    if args.camera_layout == "up_side":
+        cam_aux = scene.add_camera(
+            res=(640, 480), pos=(0.55, -0.55, cube_z + 0.25),
+            lookat=(0.55, 0.0, cube_z + 0.10), fov=50, GUI=False,
+        )
+    else:
+        # For wrist camera, these are link-local pose parameters.
+        cam_aux = scene.add_camera(
+            res=(640, 480),
+            pos=(args.wrist_cam_pos_x, args.wrist_cam_pos_y, args.wrist_cam_pos_z),
+            lookat=(args.wrist_cam_lookat_x, args.wrist_cam_lookat_y, args.wrist_cam_lookat_z),
+            fov=args.wrist_cam_fov,
+            GUI=False,
+        )
     scene.build()
 
     motors_dof = [franka.get_joint(name).dofs_idx_local[0] for name in JOINT_NAMES]
@@ -164,6 +202,30 @@ def main():
 
     n_dofs = len(JOINT_NAMES)
     end_effector = franka.get_link("hand")
+
+    if args.camera_layout == "up_wrist":
+        # Define wrist camera in hand-link frame so it follows the arm dynamically.
+        wrist_pos = torch.tensor(
+            [args.wrist_cam_pos_x, args.wrist_cam_pos_y, args.wrist_cam_pos_z],
+            dtype=gs.tc_float,
+            device=gs.device,
+        )
+        wrist_lookat = torch.tensor(
+            [args.wrist_cam_lookat_x, args.wrist_cam_lookat_y, args.wrist_cam_lookat_z],
+            dtype=gs.tc_float,
+            device=gs.device,
+        )
+        wrist_up = torch.tensor(
+            [args.wrist_cam_up_x, args.wrist_cam_up_y, args.wrist_cam_up_z],
+            dtype=gs.tc_float,
+            device=gs.device,
+        )
+        wrist_offset_T = pos_lookat_up_to_T(wrist_pos, wrist_lookat, wrist_up)
+        try:
+            cam_aux.attach(rigid_link=end_effector, offset_T=wrist_offset_T)
+        except TypeError:
+            # Backward-compatible path for older Genesis attach signature.
+            cam_aux.attach(end_effector, wrist_offset_T)
 
     def reset_scene(cx, cy):
         franka.set_dofs_position(HOME_QPOS, motors_dof)
@@ -304,7 +366,7 @@ def main():
                 parts.append(t_norm)
             state = np.concatenate(parts) if len(parts) > 1 else joints
             img_up = render_cam(cam_up)
-            img_side = render_cam(cam_side)
+            img_side = render_cam(cam_aux)
 
             franka.control_dofs_position(target, motors_dof)
             scene.step()
@@ -379,6 +441,8 @@ def main():
         "robot": "franka_panda",
         "n_dofs": n_dofs,
         "action_space": "joint_position (rad)",
+        "camera_layout": args.camera_layout,
+        "camera_keys": ["observation.images.up", "observation.images.side"],
         "cube_xy_range": {"x": list(x_range), "y": list(y_range)},
         "hover_z": args.hover_z,
         "grasp_z": args.grasp_z,
