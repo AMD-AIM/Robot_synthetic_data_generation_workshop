@@ -543,138 +543,161 @@ SmolVLA 的 loss landscape 是高度非凸的，200ep ≈ 27k frames 对 VLA 模
 
 > 假设：`overhead + wrist` 比 `overhead + side` 互补性更强（wrist 提供抓取局部接触信息）。
 
-### 实现
+### 关键发现（必读）
 
-- `01_gen_data.py`：新增 `--camera-layout up_wrist`，wrist cam attach 到 `hand` link，link-local 外参通过 `--wrist-cam-{pos,lookat,fov}` 控制
-- `05_visualize_camera_views.py`：从 dataset 导出 `ep{i}_camera_views.png`，用于视觉验证
-- Genesis 机制：`camera.attach(rigid_link=..., offset_T=...)`，每步渲染前自动 `move_to_attach()`（[Issue #1016](https://github.com/Genesis-Embodied-AI/Genesis/issues/1016), [PR #611](https://github.com/Genesis-Embodied-AI/Genesis/pull/611)）
+> **Franka MJCF `hand` link-local 坐标系：z 轴朝下（朝桌面）。**
+> 这意味着 `pos_z > 0` 把相机放到 hand **下方**（仰视），`pos_z < 0` 才是 hand **上方**（俯视）。
+> 之前所有正 `pos_z` 的配置（M3 等）都是**仰视 gripper**，这是 0/10 success 的根本原因。
 
-### 参数搜索历程（R9a/R9b）
-
-Franka hand 近距离 mount 存在严重 self-occlusion，经 3 轮搜索才找到可见候选：
-
-| 轮次 | 候选 | 策略 | 结果 |
-|:---:|------|------|------|
-| A | W0, C1-C3 | 近距离 pos 小扰动 | **全部自遮挡**，cube 不可见 |
-| B | D1-D6, U1-U3 | 固定 pos，扫 lookat/up 方向 | **仍自遮挡** |
-| C | G1-G4 | **大位移几何重置**（远离 hand） | cube+gripper 均可见 |
-| D | M1-M3 | 围绕 G1 微调 | **M3 最稳**，进入 E2E |
-
-图像存档（已清理，仅保留关键节点）：
-- `up_side/ep{0,1,2}` — baseline
-- `up_wrist/ep0` — 原始失败参考（self-occlusion）
-- `wrist_dircal/g1/ep0` — 几何重置突破点
-- `wrist_dircal/m3/ep0` — 当前最佳候选
-
-### M3 参数与图像评估
+### 正确的 Wrist Cam 配置（D040）
 
 ```
-M3: pos=(0.28, 0.00, 0.22)  lookat=(0.04, 0.00, -0.06)  up=(0,0,1)  fov=95
+mount:   hand link
+pos:     (0.05, 0.00, -0.08)    # hand 前方 5cm，上方 8cm
+lookat:  (0.00, 0.00,  0.10)    # 看向 hand 下方 10cm（指尖/cube）
+up:      (0.00, 0.00, -1.00)    # hand-local -z = world 上方
+fov:     65
 ```
 
-对比 `up_side/ep{0,1,2}` 与 `wrist_dircal/m3/ep0`，M3 有 3 个硬伤：
+**视角解读**（参考 `images/camera_views_compare/r9d_top1_D000.png`）：
 
-| 问题 | 说明 |
-|------|------|
-| **approach 阶段 cube 不可见** | 手臂远离 cube 时，wrist cam 视野内 cube 极小或出视野 |
-| **fov=95 过大** | 广角畸变，物体缩小，丧失 wrist cam 近距离细节优势 |
-| **offset 过远 (36cm)** | 实质是"前臂俯瞰相机"而非 wrist cam |
+这是标准 **eye-in-hand 俯视视角** — 相机从两指中间上方俯视抓取区域：
 
-**结论：M3 可见性成立但信息密度不如 side。需先优化参数至 ≥ side 水平，再做 E2E 对比。**
-
-### R9c：几何重构 + 自动化搜索（进行中）
-
-> **核心洞察**：M3 的根本问题不是 FOV 或 offset 微调，而是**相机 optical axis 没对准 grasp interaction zone**。
-> M3 本质上仍是"远距离外部相机"（offset 36cm，向下看桌面），不是"接触感知传感器"。
-
-#### 设计原则修正
-
-| 旧思路（R9a/R9b） | 新思路（R9c） |
-|---|---|
-| wrist cam 应全程看到 cube | wrist cam **只服务最后 5-10cm 的抓取闭环** |
-| lookat 朝向桌面/cube | lookat 对准 **gripper 闭合区域 (0,0,0)** |
-| offset 15-36cm | offset **5-12cm** |
-| 全帧均匀评分 | **grasp 阶段权重 50%**，approach 阶段完全忽略 |
-| approach 阶段 cube 不可见 = 失败 | approach 由 overhead cam 负责，**完全可以接受** |
-
-正确分工：
-
-| 阶段 | 距离 | 主要视觉 |
-|------|------|---------|
-| approach (far) | 10-30cm | overhead cam |
-| grasp (near) | 0-10cm | **wrist cam** |
-
-三个必须满足的几何条件：
-1. camera → gripper center 距离 ≈ 5-10cm
-2. optical axis ≈ 对准夹爪闭合区域
-3. grasp 时视野中 fingers 占 30-50%、cube 占 10-30%
-
-#### 搜索空间
-
-基于上述原则重新定义，**不再围绕 M3 微调**：
-
-| 分组 | mount | pos_x | pos_z | lookat_z | fov | 组合数 |
-|------|:---:|:---:|:---:|:---:|:---:|:---:|
-| **主力：link7** | panda_link7 | [0.05, 0.08, 0.12] | [0.03, 0.06, 0.10] | [0.00, -0.03] | [55, 65, 80] | 54 |
-| **对照：hand** | hand | [0.06, 0.10] | [0.04, 0.08] | [0.00] | [60, 75] | 8 |
-| **合计** | | | | | | **62** |
-
-所有候选 lookat 统一对准 gripper 中心附近 `(0, 0, 0~-0.03)`，不再向下看桌面。
-
-#### 评分机制
-
-轨迹分 5 个 phase，**approach 阶段（40 帧）完全跳过**，不渲染不打分：
-
-| Phase | 帧范围 | 权重 | 说明 |
-|-------|--------|------|------|
-| approach | 0-39 | **0**（跳过） | overhead cam 负责 |
-| pre_grasp | 40-69 | 0.15 | 下降接近 |
-| **grasp** | **70-89** | **0.50** | 关键：接触感知 |
-| lift | 90-119 | 0.25 | 抬升确认 |
-| hold | 120-134 | 0.10 | 稳定持有 |
-
-composite score = weighted_vis × 0.6 + min(grasp_area / 2000, 1) × 0.4
-
-#### 工具
-
-`scripts/07_wrist_cam_sweep.py`
-- 无 LeRobot 依赖，直接 Genesis 跑轨迹 + 渲染 + 打分
-- approach 阶段跳过渲染（加速 ~30%）
-- 输出：CSV 排名 + top-K 可视化 PNG + summary JSON
-
-#### 执行
-
-```bash
-python scripts/07_wrist_cam_sweep.py \
-  --out-dir /output/wrist_sweep \
-  --episodes-per-candidate 3 \
-  --top-k 5 \
-  --no-bbox-detection
+```
+         camera 📷 (pos_z < 0 = hand 上方)
+            │
+            ▼  俯视
+   ┌─ finger_L ─┐   ┌─ finger_R ─┐
+   │             │   │             │
+   │      ┌──────┴───┴──────┐      │
+   │      │    ★ CUBE ★     │      │
+   │      └─────────────────┘      │
+   └─────────────────────────────┘
 ```
 
-62 候选 × 3 ep，预计 ~22 min。
+- `pos_y = 0`：左右居中 → 恰好在两个平行指之间
+- `pos_x = 0.05`：hand 前方 5cm → 略偏向指尖方向
+- `pos_z = -0.08`：hand 上方 8cm → 从上往下看
+- 画面中两指对称出现在左右两侧，cube 在画面中央
+- CNN 直接学到 finger-cube 对齐关系，无需隐式空间映射
 
-#### 通过标准
+设计原则：
+- **overhead cam** 负责全局定位（world frame 俯视）
+- **wrist cam** 负责接触控制（hand frame 俯视，grasp 阶段看到 fingers + cube）
+- approach 阶段 wrist cam 看不到 cube 是正常的（overhead cam 覆盖）
+- 两者**都是俯视**，但 reference frame 不同（world vs hand-local）
 
-top-1 候选必须满足：
-1. `grasp_vis_rate` ≥ 90%（grasp 阶段 cube 几乎全程可见）
-2. `grasp_avg_area` ≥ 500px（cube 在视野中足够大）
-3. 人工确认 top-5 PNG：grasp 时 cube 在双指之间、能判断对齐
-4. 无严重自遮挡
+### 搜索历程（R9a → R9d）
 
-通过后进入 E2E：100ep × 2k × 5 seeds × 50 trials，与 up_side R4 对标。
+| 阶段 | 做了什么 | 结论 |
+|------|---------|------|
+| R9a/b | 近距离 mount + lookat 扫描 | hand 近距离严重 self-occlusion |
+| R9b-M3 | 大位移几何重置（0.28, 0, 0.22） | cube 可见但**方向反转**（仰视），E2E 0/10 |
+| R9c | 自动化 sweep（192 候选 hand + link7） | link7 不可用；hand pos_z>0 全是仰视 |
+| **R9d** | **方向修正**（pos_z<0 + lookat_z>0 + up=-z） | **72/81 viable，100% grasp_vis，方向正确** |
 
-#### 预期结果
+关键排错：
+- `link7` link frame 与 `hand` 完全不同 → **只能用 `hand`**
+- `pos_z > 0`（hand-local）= 相机在桌面仰视 → **CNN 学到反向空间关系，policy 学习难度 ↑**
+- `pos_z < 0`（hand-local）= 相机在 hand 上方俯视 → **正确 eye-in-hand 视角**
 
-- **假设成立**：panda_link7 近距离组（5-12cm）中存在 grasp_vis ≥ 90% 的候选，hand 组因 finger 遮挡普遍较差
-- **假设不成立**：所有 62 候选 grasp_vis < 70% → 说明 link-local frame 几何理解有误，需回头检查 panda_link7 的坐标系方向
-- **中间情况**：top-1 grasp_vis 70-90%，area 偏小 → 在 top-1 附近做细粒度二次搜索
+### R9d Sweep 结果摘要
 
-#### 结果
+81 候选 × 1 ep，239s。搜索范围：px=[0.02,0.05,0.08], pz=[-0.05,-0.08,-0.12], lz=[0.05,0.10,0.15], fov=[55,65,80]
 
-（待实验）
+| pz（hand 上方） | g_area 范围 | grasp_vis | 适合 policy learning |
+|-----------------|------------|-----------|---------------------|
+| -0.05（5cm） | 6300-7300 | 100% | 偏近（cube 过大，motion sensitivity 高） |
+| **-0.08（8cm）** | **3100-4700** | **100%** | **最佳平衡（detail + context）** |
+| -0.12（12cm） | 1300-2700 | 100%* | 偏远（cube 较小）；px=0.02 穿入 arm |
 
-#### 分析与 Next Step
+选择 D040（px=0.05, pz=-0.08, lz=0.10, fov=65）：g_area=3145，适中距离。
 
-（待实验）
+图像存档（已清理）：
+- `up_side/ep{0,1,2}` — side cam baseline
+- `up_wrist/ep0` — 原始 self-occlusion 参考
+- `wrist_dircal/m3/ep0` — M3 仰视（错误方向参考）
+- `r9d_top1_D000.png` — **D040 俯视（正确方向）**
+
+### R9e：E2E 实验（进行中）
+
+D040 参数 → E2E 全流程，与 up_side 对标。
+
+| 步骤 | 配置 | 状态 |
+|------|------|------|
+| 数据生成 | 100ep, seed=42, `local/franka-pick-up_wrist-d040-100ep` | 100/100 OK |
+| 训练 | 2k steps, batch=4, 5 seeds (0-4) | 进行中 |
+| Eval | 50 trials/seed, eval_seed=99, `--camera-layout up_wrist` | 待训练完成 |
+
+脚本：`scripts/run_wrist_d040_e2e.sh`（训练 + eval 一键执行）
+
+对标 baseline（up_side, R4）：
+
+| seed | up_side success_rate |
+|------|---------------------|
+| 0 | 4/50 (8%) |
+| 1 | 6/50 (12%) |
+| 2 | 8/50 (16%) |
+| 3 | 6/50 (12%) |
+| 4 | 6/50 (12%) |
+| **avg** | **6/50 (12%)** |
+
+#### R9e 结果
+
+5 seeds × 2k steps 训练 + 50 trials eval，总耗时 ~2.4h。
+
+| seed | up_wrist (D040) | up_side (baseline) | 提升 |
+|------|:---------------:|:------------------:|:----:|
+| 0 | **5/50 (10%)** | 4/50 (8%) | +2% |
+| 1 | **13/50 (26%)** | 6/50 (12%) | +14% |
+| 2 | 1/50 (2%) | **8/50 (16%)** | -14% |
+| 3 | **23/50 (46%)** | 6/50 (12%) | +34% |
+| 4 | **21/50 (42%)** | 6/50 (12%) | +30% |
+| **avg** | **12.6/50 (25.2%)** | **6/50 (12%)** | **+13.2%** |
+| **median** | **13/50 (26%)** | **6/50 (12%)** | **+14%** |
+| **max** | **23/50 (46%)** | **8/50 (16%)** | **+30%** |
+
+#### R9e 分析
+
+1. **up_wrist 平均 success rate 是 up_side 的 2.1×**（25.2% vs 12%）
+2. **seed 敏感性仍然高**：最好 46%，最差 2%（方差比 up_side 更大）
+3. **3/5 seeds 明显优于 up_side**（seed 1,3,4），1 seed 持平（seed 0），1 seed 明显更差（seed 2）
+4. **方向修正是关键**：之前仰视的 M3 配置 0/10，修正后平均 25%
+5. **100ep + 2k steps 仍然不够**：最佳 seed 也只有 46%，需要更多数据或更长训练
+
+**Wrist 高 variance 的原因分析**（详见 `camera_layout_analysis.md`）：
+
+- Side cam：信息弱但稳定（固定视角，帧间变化小）→ **容易学，low variance, low ceiling**
+- Wrist cam：信息强但非平稳（随手移动，approach 阶段≈噪声）→ **难学，high variance, high ceiling**
+- 2k steps < 1 epoch（3375 steps/epoch），policy 还没学完一遍数据，wrist feature 的复杂性尚未被充分学习
+
+### R9f：延长训练（100ep + 4k steps）
+
+> **假设**：高 variance 的根因是训练不足，延长到 4k steps（≈1.2 epoch）能降低 seed 敏感性并提升平均 success rate。
+
+| 配置 | R9e（对照） | R9f |
+|------|-----------|-----|
+| 数据 | 100ep (不变) | 100ep (不变，复用 `local/franka-pick-up_wrist-d040-100ep`) |
+| 训练 | 2k steps | **4k steps** |
+| Seeds | 0-4 | 0-4 |
+| Eval | 50 trials, seed=99 | 50 trials, seed=99 |
+| save-every | 500 (默认) | **2000**（节省磁盘） |
+
+预期结果：
+
+| 场景 | 指标变化 | 解读 |
+|------|---------|------|
+| **假设成立** | avg ≥ 35%, std ↓, seed 2 回升 | 训练不足是主因，继续 200ep+4k |
+| **部分成立** | avg ~30%, std 略降 | 训练有帮助但数据多样性也是瓶颈 |
+| **假设不成立** | avg ≤ 25%, std 不变 | 可能过拟合 100ep，需 200ep |
+
+**磁盘管理**：
+- 系统盘 `/` 仅剩 66G (1.8T, 97%)，已清理 R9e 所有 checkpoints（保留 eval 结果）
+- `--save-every 2000`：5 seeds × 3 ckpts × 1.2G ≈ 18G，安全
+- `/dc2/david/` 有 1.6T 空闲，后续 10k+ 实验需重建容器挂载此盘
+- 脚本：`scripts/run_wrist_d040_4k.sh`
+
+#### R9f 结果
+
+（实验进行中...）
 
