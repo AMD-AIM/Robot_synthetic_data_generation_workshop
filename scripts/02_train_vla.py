@@ -107,16 +107,17 @@ def main():
     )
     ap.add_argument(
         "--amp",
-        action="store_true",
-        help="Enable BF16 mixed-precision training via torch.autocast.",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="BF16 mixed-precision training via torch.autocast (default: on, use --no-amp to disable).",
     )
     ap.add_argument(
         "--attn-backend",
-        default="math",
+        default="auto",
         choices=["math", "auto"],
         help=(
-            "SDPA backend: 'math' = disable flash+efficient (safe fallback), "
-            "'auto' = let PyTorch choose (flash/efficient/math)."
+            "SDPA backend: 'auto' = let PyTorch choose (flash/efficient/math, default), "
+            "'math' = disable flash+efficient (safe fallback)."
         ),
     )
     ap.add_argument(
