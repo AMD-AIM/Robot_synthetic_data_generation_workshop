@@ -13,18 +13,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import math as _math
 from collections import defaultdict
-import sys
 import time
 from pathlib import Path
 
 import torch
-
-# Workaround: AOTriton SDPA hangs on AMD MI300 (ROCm 6.4).
-# Disable flash/mem_efficient SDPA backends; fall back to math kernel.
-if hasattr(torch.backends, "cuda") and hasattr(torch.backends.cuda, "enable_flash_sdp"):
-    torch.backends.cuda.enable_flash_sdp(False)
-    torch.backends.cuda.enable_mem_efficient_sdp(False)
 
 
 def make_delta_timestamps(delta_indices, fps: int):
@@ -111,6 +105,43 @@ def main():
         default=0,
         help="Drop first N frames of each episode before training (0 disables).",
     )
+    ap.add_argument(
+        "--amp",
+        action="store_true",
+        help="Enable BF16 mixed-precision training via torch.autocast.",
+    )
+    ap.add_argument(
+        "--attn-backend",
+        default="math",
+        choices=["math", "auto"],
+        help=(
+            "SDPA backend: 'math' = disable flash+efficient (safe fallback), "
+            "'auto' = let PyTorch choose (flash/efficient/math)."
+        ),
+    )
+    ap.add_argument(
+        "--compile",
+        action="store_true",
+        help="Apply torch.compile to the policy for kernel fusion / graph optimization.",
+    )
+    ap.add_argument(
+        "--compile-mode",
+        default="reduce-overhead",
+        choices=["default", "reduce-overhead", "max-autotune"],
+        help="torch.compile mode (default: reduce-overhead).",
+    )
+    ap.add_argument(
+        "--lr-scheduler",
+        default="none",
+        choices=["none", "cosine"],
+        help="LR scheduler: 'none' = constant LR, 'cosine' = cosine decay with warmup.",
+    )
+    ap.add_argument(
+        "--warmup-steps",
+        type=int,
+        default=None,
+        help="Warmup steps for cosine scheduler (default: 10%% of n-steps).",
+    )
     args = ap.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -119,6 +150,17 @@ def main():
         for i in range(torch.cuda.device_count()):
             props = torch.cuda.get_device_properties(i)
             print(f"  GPU[{i}]: {props.name}  VRAM: {props.total_memory / 1024**3:.1f} GB")
+
+    # ---- SDPA backend selection ----
+    if hasattr(torch.backends, "cuda") and hasattr(torch.backends.cuda, "enable_flash_sdp"):
+        if args.attn_backend == "math":
+            torch.backends.cuda.enable_flash_sdp(False)
+            torch.backends.cuda.enable_mem_efficient_sdp(False)
+            print("[train] SDPA backend: math only (flash + efficient disabled)")
+        else:
+            torch.backends.cuda.enable_flash_sdp(True)
+            torch.backends.cuda.enable_mem_efficient_sdp(True)
+            print("[train] SDPA backend: auto (flash + efficient enabled)")
 
     try:
         from lerobot.configs.types import FeatureType
@@ -169,6 +211,16 @@ def main():
     print(f"  total params: {total_params:,} (~{total_params/1e6:.0f}M)")
     print(f"  trainable: {trainable_params:,} (~{trainable_params/1e6:.1f}M)")
     print(f"  frozen: {total_params - trainable_params:,}")
+
+    if args.compile:
+        print(f"[train] torch.compile mode={args.compile_mode} ...")
+        policy = torch.compile(policy, mode=args.compile_mode)
+        print("[train] torch.compile applied (graph traced on first forward)")
+
+    amp_enabled = args.amp and device.type == "cuda"
+    amp_dtype = torch.bfloat16 if amp_enabled else None
+    if amp_enabled:
+        print(f"[train] AMP enabled: dtype={amp_dtype}")
 
     preprocessor, postprocessor = make_pre_post_processors(
         cfg, dataset_stats=dataset_metadata.stats,
@@ -240,6 +292,21 @@ def main():
     )
     print(f"[train] optimizer: AdamW lr={lr}")
 
+    # ---- lr scheduler ----
+    lr_scheduler = None
+    if args.lr_scheduler == "cosine":
+        warmup_steps = args.warmup_steps if args.warmup_steps is not None else max(1, args.n_steps // 10)
+        min_lr = lr * 0.025
+
+        def _cosine_with_warmup(current_step: int) -> float:
+            if current_step < warmup_steps:
+                return current_step / warmup_steps
+            progress = (current_step - warmup_steps) / max(1, args.n_steps - warmup_steps)
+            return max(min_lr / lr, 0.5 * (1.0 + _math.cos(_math.pi * progress)))
+
+        lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, _cosine_with_warmup)
+        print(f"[train] LR scheduler: cosine warmup={warmup_steps} steps, min_lr={min_lr:.2e}")
+
     # ---- training loop ----
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -249,6 +316,18 @@ def main():
     epoch = 0
     t_start = time.time()
 
+    opt_flags = []
+    if amp_enabled:
+        opt_flags.append("AMP-BF16")
+    if args.attn_backend == "auto":
+        opt_flags.append("SDPA-auto")
+    else:
+        opt_flags.append("SDPA-math")
+    if lr_scheduler is not None:
+        opt_flags.append("cosine-LR")
+    if args.compile:
+        opt_flags.append(f"compile({args.compile_mode})")
+    print(f"[train] optimizations: {' | '.join(opt_flags) if opt_flags else 'none'}")
     print(f"\n[train] starting {args.n_steps} steps...")
     while step < args.n_steps:
         epoch += 1
@@ -258,30 +337,37 @@ def main():
 
             t0 = time.time()
             batch = preprocessor(batch)
-            loss, info = policy.forward(batch)
+
+            with torch.autocast(device_type="cuda", dtype=amp_dtype, enabled=amp_enabled):
+                loss, info = policy.forward(batch)
+
             loss.backward()
 
             grad_norm = torch.nn.utils.clip_grad_norm_(trainable, cfg.optimizer_grad_clip_norm)
             optimizer.step()
             optimizer.zero_grad()
+            if lr_scheduler is not None:
+                lr_scheduler.step()
             step_time = time.time() - t0
 
+            current_lr = optimizer.param_groups[0]["lr"]
             record = {
                 "step": step,
                 "epoch": epoch,
                 "loss": float(loss.item()),
                 "grad_norm": float(grad_norm.item()) if hasattr(grad_norm, "item") else float(grad_norm),
-                "lr": float(lr),
+                "lr": float(current_lr),
                 "step_time_s": float(step_time),
             }
             metrics_log.append(record)
 
             if step % args.log_every == 0 or step == args.n_steps - 1:
                 elapsed = time.time() - t_start
+                lr_str = f" | lr {current_lr:.2e}" if lr_scheduler is not None else ""
                 print(
                     f"  step {step:5d}/{args.n_steps} | loss {record['loss']:.4f} | "
                     f"grad_norm {record['grad_norm']:.4f} | "
-                    f"{step_time:.2f}s/step | elapsed {elapsed:.0f}s"
+                    f"{step_time:.2f}s/step{lr_str} | elapsed {elapsed:.0f}s"
                 )
 
             if args.save_every > 0 and step > 0 and step % args.save_every == 0:
@@ -318,6 +404,11 @@ def main():
         "batch_size": args.batch_size,
         "num_workers": int(args.num_workers),
         "lr": float(lr),
+        "lr_scheduler": args.lr_scheduler,
+        "amp": amp_enabled,
+        "attn_backend": args.attn_backend,
+        "compile": args.compile,
+        "compile_mode": args.compile_mode if args.compile else None,
         "total_time_s": float(elapsed),
         "final_loss": float(metrics_log[-1]["loss"]) if metrics_log else None,
         "loss_start": float(metrics_log[0]["loss"]) if metrics_log else None,
