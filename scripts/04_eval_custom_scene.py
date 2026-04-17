@@ -138,8 +138,11 @@ def main():
         "--render-cpu",
         action="store_true",
         help="Force Genesis to use CPU (llvmpipe) backend while keeping the "
-             "SmolVLA policy on CUDA. Needed on CDNA3 MI300/MI308 where the "
-             "host has ROCm for PyTorch but no graphics driver for Vulkan.",
+             "SmolVLA policy on CUDA. Needed on CDNA3 (MI300 series) where "
+             "the host has ROCm for PyTorch but no graphics driver for "
+             "Vulkan. NOTE: CPU rendering introduces a systematic ~20 pt "
+             "success-rate bias vs GPU radeonsi rendering; use for debug "
+             "only, not for reporting benchmark numbers.",
     )
 
     from pick_common import add_pick_args, build_scene, attach_wrist_cam, CUBE_SIZE

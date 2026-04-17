@@ -169,6 +169,16 @@ def main():
                     help="Language instruction for VLA models (e.g. SmolVLA)")
     ap.add_argument("--no-bbox-detection", action="store_true",
                     help="Disable box_box_detection (workaround for AMD LLVM fatal)")
+    ap.add_argument("--camera-layout", type=str, default="up_side",
+                    choices=["up_side", "up_wrist"],
+                    help="Camera layout matching training data.")
+    ap.add_argument("--wrist-cam-pos", type=float, nargs=3, default=[0.05, 0.0, -0.08],
+                    help="Wrist cam pos (x,y,z) in hand-link frame")
+    ap.add_argument("--wrist-cam-lookat", type=float, nargs=3, default=[0.0, 0.0, 0.10],
+                    help="Wrist cam lookat (x,y,z) in hand-link frame")
+    ap.add_argument("--wrist-cam-up", type=float, nargs=3, default=[0.0, 0.0, -1.0],
+                    help="Wrist cam up vector in hand-link frame")
+    ap.add_argument("--wrist-cam-fov", type=float, default=65.0)
     args = ap.parse_args()
 
     ensure_display()
@@ -497,10 +507,18 @@ def main():
         res=(640, 480), pos=(0.55, 0.55, 0.55),
         lookat=(0.55, 0.0, 0.10), fov=45, GUI=False,
     )
-    cam_side = scene.add_camera(
-        res=(640, 480), pos=(0.55, -0.55, cube_z + 0.25),
-        lookat=(0.55, 0.0, cube_z + 0.10), fov=50, GUI=False,
-    )
+    if args.camera_layout == "up_side":
+        cam_side = scene.add_camera(
+            res=(640, 480), pos=(0.55, -0.55, cube_z + 0.25),
+            lookat=(0.55, 0.0, cube_z + 0.10), fov=50, GUI=False,
+        )
+    else:
+        cam_side = scene.add_camera(
+            res=(640, 480),
+            pos=tuple(args.wrist_cam_pos),
+            lookat=tuple(args.wrist_cam_lookat),
+            fov=args.wrist_cam_fov, GUI=False,
+        )
     scene.build()
     _needs_images = policy_type in ("act", "smolvla")
 
@@ -509,6 +527,18 @@ def main():
     franka.set_dofs_kp(KP, motors_dof)
     franka.set_dofs_kv(KV, motors_dof)
     franka.set_dofs_force_range(FORCE_LOWER, FORCE_UPPER, motors_dof)
+
+    if args.camera_layout == "up_wrist":
+        from genesis.utils.geom import pos_lookat_up_to_T
+        end_effector = franka.get_link("hand")
+        wrist_pos = torch.tensor(args.wrist_cam_pos, dtype=gs.tc_float, device=gs.device)
+        wrist_lookat = torch.tensor(args.wrist_cam_lookat, dtype=gs.tc_float, device=gs.device)
+        wrist_up = torch.tensor(args.wrist_cam_up, dtype=gs.tc_float, device=gs.device)
+        wrist_offset_T = pos_lookat_up_to_T(wrist_pos, wrist_lookat, wrist_up)
+        try:
+            cam_side.attach(rigid_link=end_effector, offset_T=wrist_offset_T)
+        except TypeError:
+            cam_side.attach(end_effector, wrist_offset_T)
 
     def reset_scene(cx, cy, init_state=None):
         init_q = init_state if init_state is not None else HOME_QPOS
