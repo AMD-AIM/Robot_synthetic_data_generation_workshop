@@ -135,7 +135,7 @@ def main():
     ap.add_argument("--save", default="/output/kitchen_eval")
     ap.add_argument("--record-video", action="store_true")
 
-    from pick_common import add_pick_args, build_scene, CUBE_SIZE
+    from pick_common import add_pick_args, build_scene, attach_wrist_cam, CUBE_SIZE
     from scene_placement import (
         CUBE_RANGE_X, CUBE_RANGE_Y, to_world,
     )
@@ -367,6 +367,8 @@ def main():
 
     scene, franka, cube, cam_ov, cam_front, cam_up, cam_side, info = build_scene(args, gs)
     scene.build()
+
+    attach_wrist_cam(args, franka, cam_side, gs)
 
     motors_dof = set_franka_home(franka)
     franka.set_dofs_kp(KP, motors_dof)

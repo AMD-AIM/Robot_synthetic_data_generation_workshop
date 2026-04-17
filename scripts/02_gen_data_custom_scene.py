@@ -62,6 +62,12 @@ def main():
     ap.add_argument("--add-goal", action="store_true",
                     help="Append cube (x,y) to observation.state")
 
+    # Smoke-test: dump PNGs from up + side/wrist cams at a few frames of the
+    # first episode so the viewpoint can be visually inspected before a big run.
+    ap.add_argument("--smoke-dump-pngs", type=str, default=None,
+                    help="Dir to dump up/side PNGs at phases 0/25/50/75/100%% "
+                         "of the first episode (for occlusion check).")
+
     # Trajectory args
     ap.add_argument("--settle-steps", type=int, default=30)
     ap.add_argument("--approach-steps", type=int, default=40)
@@ -75,7 +81,7 @@ def main():
     ap.add_argument("--success-sustain-frames", type=int, default=8)
     ap.add_argument("--success-final-delta", type=float, default=0.01)
 
-    from pick_common import add_pick_args, build_scene, CUBE_SIZE
+    from pick_common import add_pick_args, build_scene, attach_wrist_cam, CUBE_SIZE
     from scene_placement import (
         HAND_OFFSET, HOVER_DZ, LIFT_DZ, CUBE_RANGE_X, CUBE_RANGE_Y,
         compute_workspace, to_world,
@@ -106,6 +112,8 @@ def main():
 
     scene, franka, cube, cam_ov, cam_front, cam_up, cam_side, info = build_scene(args, gs)
     scene.build()
+
+    attach_wrist_cam(args, franka, cam_side, gs)
 
     motors_dof = set_franka_home(franka)
     franka.set_dofs_kp(KP, motors_dof)
@@ -250,6 +258,20 @@ def main():
     frames_per_episode = None
     episode_labels = []
 
+    smoke_dir = None
+    if args.smoke_dump_pngs:
+        smoke_dir = Path(args.smoke_dump_pngs)
+        smoke_dir.mkdir(parents=True, exist_ok=True)
+        print(f"[smoke] will dump PNGs of first episode to {smoke_dir}")
+
+    def _save_png(path, arr):
+        try:
+            from PIL import Image
+            Image.fromarray(arr).save(path)
+        except ImportError:
+            import imageio.v2 as imageio
+            imageio.imwrite(path, arr)
+
     for ep in range(args.n_episodes):
         dx, dy, (cx, cy, cz) = episode_points[ep]
 
@@ -259,6 +281,17 @@ def main():
         if frames_per_episode is None:
             frames_per_episode = len(traj)
             print(f"[gen] trajectory: {frames_per_episode} frames/episode")
+
+        if ep == 0 and smoke_dir is not None:
+            last = max(frames_per_episode - 1, 0)
+            smoke_frames = sorted({0,
+                                   last // 4,
+                                   last // 2,
+                                   (3 * last) // 4,
+                                   last})
+        else:
+            smoke_frames = set()
+        side_tag = "wrist" if info.get("camera_layout") == "up_wrist" else "side"
 
         cube_z_hist = []
         total_steps = len(traj)
@@ -275,6 +308,11 @@ def main():
 
             img_up = render_cam(cam_up)
             img_side = render_cam(cam_side)
+
+            if step_idx in smoke_frames:
+                _save_png(smoke_dir / f"ep0_f{step_idx:03d}_up.png", img_up)
+                _save_png(smoke_dir / f"ep0_f{step_idx:03d}_{side_tag}.png", img_side)
+                print(f"[smoke] dumped up+{side_tag} PNG at frame {step_idx}/{total_steps}")
 
             franka.control_dofs_position(target, motors_dof)
             scene.step()
@@ -355,6 +393,7 @@ def main():
         "action_space": "joint_position (rad)",
         "scene": args.scene,
         "anchor": args.anchor,
+        "camera_layout": info.get("camera_layout", "up_side"),
         "base_xy": list(base_xy),
         "yaw": yaw,
         "surface_z": surface_z,

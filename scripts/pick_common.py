@@ -116,6 +116,27 @@ def add_pick_args(ap: argparse.ArgumentParser) -> None:
                     help="Load placement from scene anchor (e.g. left_counter)")
     ap.add_argument("--show-axes", action="store_true",
                     help="Draw RGB axis markers at world origin")
+    # Camera layout: up+side (fixed world cams) or up+wrist (eye-in-hand).
+    ap.add_argument(
+        "--camera-layout", type=str, default="up_side",
+        choices=["up_side", "up_wrist"],
+        help="Camera layout: up+side (fixed world cams) or up+wrist "
+             "(camera attached to Franka hand link). Wrist mirrors "
+             "01_gen_data.py R9d D040 defaults.",
+    )
+    # Wrist-camera hand-link-local pose (R9d D040 defaults, validated on flat).
+    ap.add_argument("--wrist-cam-pos-x", type=float, default=0.05)
+    ap.add_argument("--wrist-cam-pos-y", type=float, default=0.00)
+    ap.add_argument("--wrist-cam-pos-z", type=float, default=-0.08,
+                    help="Negative z = above hand")
+    ap.add_argument("--wrist-cam-lookat-x", type=float, default=0.00)
+    ap.add_argument("--wrist-cam-lookat-y", type=float, default=0.00)
+    ap.add_argument("--wrist-cam-lookat-z", type=float, default=0.10,
+                    help="Positive z = below hand (toward gripper tip)")
+    ap.add_argument("--wrist-cam-up-x", type=float, default=0.0)
+    ap.add_argument("--wrist-cam-up-y", type=float, default=0.0)
+    ap.add_argument("--wrist-cam-up-z", type=float, default=-1.0)
+    ap.add_argument("--wrist-cam-fov", type=float, default=65.0)
     add_placement_args(ap, defaults=PLACEMENT_DEFAULTS)
 
 
@@ -333,14 +354,63 @@ def build_scene(args, gs):
         res=cu["res"], pos=cu["pos"], lookat=cu["lookat"],
         fov=cu["fov"], GUI=False,
     )
-    cam_side = scene.add_camera(
-        res=cs["res"], pos=cs["pos"], lookat=cs["lookat"],
-        fov=cs["fov"], GUI=False,
-    )
+
+    camera_layout = getattr(args, "camera_layout", "up_side")
+    if camera_layout == "up_wrist":
+        # Pass hand-link-local pose here; attach_wrist_cam() below binds it to
+        # the franka hand after scene.build() (must be called by caller).
+        cam_side = scene.add_camera(
+            res=cs["res"],
+            pos=(args.wrist_cam_pos_x, args.wrist_cam_pos_y, args.wrist_cam_pos_z),
+            lookat=(args.wrist_cam_lookat_x, args.wrist_cam_lookat_y, args.wrist_cam_lookat_z),
+            fov=args.wrist_cam_fov,
+            GUI=False,
+        )
+        print(f"[cam] layout=up_wrist  pos=({args.wrist_cam_pos_x:.2f},"
+              f"{args.wrist_cam_pos_y:.2f},{args.wrist_cam_pos_z:.2f}) "
+              f"fov={args.wrist_cam_fov}  (attach after scene.build())")
+    else:
+        cam_side = scene.add_camera(
+            res=cs["res"], pos=cs["pos"], lookat=cs["lookat"],
+            fov=cs["fov"], GUI=False,
+        )
 
     info = dict(
         scene_name=args.scene, scene_config=cfg,
         base_xy=base_xy, base_z=args.base_z, yaw=args.yaw,
         surface_z=surface_z, cube_pos=ws["cube"],
+        camera_layout=camera_layout,
     )
     return scene, franka, cube, cam_overview, cam_front, cam_up, cam_side, info
+
+
+def attach_wrist_cam(args, franka, cam_side, gs):
+    """If ``camera_layout == up_wrist``, bind ``cam_side`` to the hand link.
+
+    Must be called after ``scene.build()`` so that franka links are resolved.
+    Silently no-op for up_side layout so callers can invoke unconditionally.
+    """
+    if getattr(args, "camera_layout", "up_side") != "up_wrist":
+        return
+    import torch
+    from genesis.utils.geom import pos_lookat_up_to_T
+
+    hand = franka.get_link("hand")
+    wrist_pos = torch.tensor(
+        [args.wrist_cam_pos_x, args.wrist_cam_pos_y, args.wrist_cam_pos_z],
+        dtype=gs.tc_float, device=gs.device,
+    )
+    wrist_lookat = torch.tensor(
+        [args.wrist_cam_lookat_x, args.wrist_cam_lookat_y, args.wrist_cam_lookat_z],
+        dtype=gs.tc_float, device=gs.device,
+    )
+    wrist_up = torch.tensor(
+        [args.wrist_cam_up_x, args.wrist_cam_up_y, args.wrist_cam_up_z],
+        dtype=gs.tc_float, device=gs.device,
+    )
+    wrist_offset_T = pos_lookat_up_to_T(wrist_pos, wrist_lookat, wrist_up)
+    try:
+        cam_side.attach(rigid_link=hand, offset_T=wrist_offset_T)
+    except TypeError:
+        cam_side.attach(hand, wrist_offset_T)
+    print("[cam] wrist camera attached to franka hand link")
