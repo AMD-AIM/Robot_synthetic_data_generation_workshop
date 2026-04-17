@@ -134,6 +134,13 @@ def main():
     # Output
     ap.add_argument("--save", default="/output/kitchen_eval")
     ap.add_argument("--record-video", action="store_true")
+    ap.add_argument(
+        "--render-cpu",
+        action="store_true",
+        help="Force Genesis to use CPU (llvmpipe) backend while keeping the "
+             "SmolVLA policy on CUDA. Needed on CDNA3 MI300/MI308 where the "
+             "host has ROCm for PyTorch but no graphics driver for Vulkan.",
+    )
 
     from pick_common import add_pick_args, build_scene, attach_wrist_cam, CUBE_SIZE
     from scene_placement import (
@@ -348,6 +355,9 @@ def main():
                     img_t = torch.from_numpy(img).permute(2, 0, 1).unsqueeze(0).float().to(device) / 255.0
                     obs[k] = img_t
             obs = preprocessor(obs)
+            for _k, _v in list(obs.items()):
+                if isinstance(_v, torch.Tensor) and _v.device != device:
+                    obs[_k] = _v.to(device)
             raw = vla_policy.select_action(obs)
             raw = postprocessor(raw)
             actions = raw["action"] if isinstance(raw, dict) else raw
@@ -363,7 +373,10 @@ def main():
     # ------------------------------------------------------------------
     ensure_display()
     import genesis as gs
-    gs.init(backend=(gs.cpu if args.cpu else gs.gpu), logging_level="warning")
+    use_cpu_render = bool(args.cpu or args.render_cpu)
+    gs.init(backend=(gs.cpu if use_cpu_render else gs.gpu), logging_level="warning")
+    if use_cpu_render:
+        print(f"[eval] Genesis backend=cpu (llvmpipe); policy device={device}")
 
     scene, franka, cube, cam_ov, cam_front, cam_up, cam_side, info = build_scene(args, gs)
     scene.build()
