@@ -3,7 +3,7 @@ set -e
 
 echo "=== Step 1: Install genesis (main) + lerobot ==="
 pip install -q git+https://github.com/Genesis-Embodied-AI/Genesis.git@main \
-  lerobot==0.4.4 transformers accelerate safetensors matplotlib Pillow jupyter nbconvert ipykernel 2>&1 | tail -5
+  lerobot==0.4.4 transformers accelerate safetensors matplotlib Pillow jupyter nbconvert ipykernel num2words 2>&1 | tail -5
 
 echo "=== Step 2: Rebuild skimage with pinned numpy ==="
 pip install --force-reinstall --no-cache-dir -q "scikit-image>=0.22" "numpy==2.1.2" 2>&1 | tail -5

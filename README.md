@@ -80,7 +80,41 @@ cd Robot_synthetic_data_generation_workshop
 ### Step 3 — Launch a Docker container
 
 <details open>
-<summary><b>CDNA3 (MI300 series) — ROCm 6.x — workshop primary</b></summary>
+<summary><b>Option A: Pre-built workshop image (recommended for class)</b></summary>
+
+The pre-built image includes all Python/system dependencies, torchcodec (CPU-only), SmolVLA base model, HF dataset cache, and pre-compiled Taichi kernels. Students can skip Step 4 entirely and go straight to Step 5.
+
+```bash
+docker run --rm -it \
+  --device=/dev/kfd --device=/dev/dri --group-add video --ipc=host \
+  --network=host \
+  -v $(pwd):/workspace/workshop \
+  -v /tmp/workshop_output:/output \
+  -w /workspace/workshop \
+  workshop-genesis:latest \
+  bash
+```
+
+> On CDNA3 (MI300) nodes, add `-e HSA_OVERRIDE_GFX_VERSION=9.4.2` to the `docker run` command. RDNA4 does not need this.
+
+Build the image once per cluster (takes ~40 min, most of it is Taichi CPU kernel warmup):
+
+```bash
+# Default: ROCm 7.2 base (verified on both CDNA3 and RDNA4)
+bash docker/build.sh                             # → workshop-genesis:latest
+bash docker/build.sh my-registry/workshop:v1     # custom tag for push
+
+# Alternative: ROCm 6.4.3 base (if nodes only have ROCm 6.x driver)
+BASE_IMAGE=rocm/pytorch:rocm6.4.3_ubuntu24.04_py3.12_pytorch_release_2.6.0 \
+  bash docker/build.sh workshop-mi300:latest
+```
+
+See [`docker/Dockerfile.workshop`](docker/Dockerfile.workshop) for what's baked in.
+
+</details>
+
+<details>
+<summary><b>Option B: Base ROCm image — CDNA3 (MI300 series) — manual setup</b></summary>
 
 ```bash
 docker run --rm -it \
@@ -91,16 +125,16 @@ docker run --rm -it \
   -v /tmp/workshop_output:/output \
   -v ~/.cache/huggingface:/root/.cache/huggingface \
   -w /workspace/workshop \
-  <genesis-amd-docker-image> \
+  rocm/pytorch:rocm6.4.3_ubuntu24.04_py3.12_pytorch_release_2.6.0 \
   bash
 ```
 
-This is the container students run during the workshop for training and evaluation.
+This requires manual dependency installation (Step 4). If `pip install` fails with DNS errors inside the container, add `--network=host` to the `docker run` command.
 
 </details>
 
 <details>
-<summary><b>RDNA4 (R9700) — ROCm 7.2 — preferred for data generation / benchmark eval</b></summary>
+<summary><b>Option C: RDNA4 (R9700) — ROCm 7.2 — preferred for data generation / benchmark eval</b></summary>
 
 ```bash
 docker run --rm -it \
@@ -120,13 +154,15 @@ docker run --rm -it \
 
 > The `-it` flag gives you an interactive shell. All subsequent steps run inside this container.
 
-### Step 4 — Install dependencies (inside the container)
+### Step 4 — Install dependencies (skip if using pre-built image)
+
+> If you launched with the pre-built `workshop-genesis` image (Option A), **skip to Step 5** — everything below is already baked in.
 
 ```bash
 # Python packages
 pip install -q git+https://github.com/Genesis-Embodied-AI/Genesis.git@main \
   lerobot==0.4.4 transformers accelerate safetensors \
-  matplotlib Pillow jupyter ipykernel
+  matplotlib Pillow jupyter ipykernel num2words
 
 # Fix numpy / scikit-image ABI mismatch (Genesis requires numpy==2.1.2)
 pip install --force-reinstall --no-cache-dir -q "scikit-image>=0.22" "numpy==2.1.2"
@@ -137,7 +173,7 @@ apt-get update -qq && apt-get install -y -qq xvfb ffmpeg > /dev/null 2>&1
 
 #### Step 4b — Build torchcodec (CPU-only) — REQUIRED
 
-The HF dataset uses AV1 video; `torchcodec` decodes it at training time. The pip wheel links NVIDIA CUDA libs and won't import on ROCm. `torchcodec`'s GPU decode path is NVDEC-only — AMD has equivalent hardware (VCN) but no upstream backend yet, so CPU `libavcodec` is the only working path. This is not a training bottleneck (video I/O << GPU forward/backward).
+The HF dataset uses AV1 video; `torchcodec` decodes it at training time. The pip wheel links NVIDIA CUDA libs and won't import on ROCm — CPU `libavcodec` is the only working path on AMD. This is not a training bottleneck.
 
 ```bash
 bash setup_torchcodec.sh   # ~3-5 min, clones v0.10.0 + builds CPU-only
@@ -189,6 +225,10 @@ robot_synthetic_data_generation_workshop/
 ├── workshop_pipeline.ipynb          ← ★ Jupyter Notebook (workshop main body)
 ├── fix_and_run.sh                   ← one-shot: install deps + ROCm patches + run notebook
 ├── setup_torchcodec.sh              ← build torchcodec v0.10.0 CPU-only for ROCm
+├── docker/
+│   ├── Dockerfile.workshop          ← pre-built image (all deps + Taichi cache + models)
+│   ├── build.sh                     ← build helper script
+│   └── warmup_cache.py              ← Taichi kernel pre-compilation for Docker build
 ├── images/                          ← pre-generated visualizations (referenced by notebook)
 │   ├── ep0_camera_views.png
 │   ├── ep0_joint_trajectory.png
@@ -219,6 +259,7 @@ robot_synthetic_data_generation_workshop/
 | `torch` | ≥2.1 (ROCm) | Training and inference |
 | `transformers` | ≥4.40 | SmolVLA backbone (Idefics3) |
 | `accelerate` | latest | HuggingFace model loading |
+| `num2words` | latest | Required by `transformers` SmolVLM processor |
 | `numpy` | ==2.1.2 | Required by Genesis; must match scikit-image C extension ABI |
 | `scikit-image` | ≥0.22 | Must be recompiled against numpy==2.1.2 |
 | `xvfb` | system | Headless rendering (apt-get install) |
@@ -267,8 +308,10 @@ python scripts/04_eval_custom_scene.py \
   --save /output/eval_kitchen_wrist
 ```
 
+- **Download kitchen assets first**: `python scripts/00_download_kitchen.py` (one-time, ~130 MB). The notebook does this automatically in Section 0; for CLI usage, run it manually before eval.
 - `--camera-layout up_wrist` **must** match the dataset; omitting it loads a world-fixed side camera.
 - `--render-cpu` (CDNA3 only) forces CPU llvmpipe; introduces ~20 pt success-rate bias vs GPU rendering — see [Appendix A](#appendix-a-rendering-backend-cdna3-vs-rdna4).
+- First-time Genesis CPU compilation (`scene.build()`) takes **20-30 min** on MI300; subsequent runs reuse the Taichi kernel cache. The pre-built Docker image (Option A) already includes this cache — no wait.
 
 </details>
 

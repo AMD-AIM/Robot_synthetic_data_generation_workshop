@@ -78,7 +78,41 @@ cd Robot_synthetic_data_generation_workshop
 ### 第 3 步 — 启动 Docker 容器
 
 <details open>
-<summary><b>CDNA3 (MI300 系列) — ROCm 6.x — workshop 主节点</b></summary>
+<summary><b>方案 A：预构建 Workshop 镜像（课堂推荐）</b></summary>
+
+预构建镜像已包含所有 Python/系统依赖、torchcodec（CPU-only）、SmolVLA 基础模型、HF 数据集缓存，以及预编译的 Taichi 内核。学员可跳过第 4 步，直接进入第 5 步。
+
+```bash
+docker run --rm -it \
+  --device=/dev/kfd --device=/dev/dri --group-add video --ipc=host \
+  --network=host \
+  -v $(pwd):/workspace/workshop \
+  -v /tmp/workshop_output:/output \
+  -w /workspace/workshop \
+  workshop-genesis:latest \
+  bash
+```
+
+> CDNA3 (MI300) 节点需额外添加 `-e HSA_OVERRIDE_GFX_VERSION=9.4.2`；RDNA4 不需要。
+
+在集群中构建一次镜像（约 40 分钟，主要耗时在 Taichi CPU 内核预编译）：
+
+```bash
+# 默认：ROCm 7.2 基础镜像（已在 CDNA3 和 RDNA4 上验证）
+bash docker/build.sh                             # → workshop-genesis:latest
+bash docker/build.sh my-registry/workshop:v1     # 自定义 tag，方便 push
+
+# 备选：ROCm 6.4.3 基础镜像（若节点仅有 ROCm 6.x 驱动）
+BASE_IMAGE=rocm/pytorch:rocm6.4.3_ubuntu24.04_py3.12_pytorch_release_2.6.0 \
+  bash docker/build.sh workshop-mi300:latest
+```
+
+详见 [`docker/Dockerfile.workshop`](docker/Dockerfile.workshop)。
+
+</details>
+
+<details>
+<summary><b>方案 B：基础 ROCm 镜像 — CDNA3 (MI300 系列) — 手动配置</b></summary>
 
 ```bash
 docker run --rm -it \
@@ -89,16 +123,16 @@ docker run --rm -it \
   -v /tmp/workshop_output:/output \
   -v ~/.cache/huggingface:/root/.cache/huggingface \
   -w /workspace/workshop \
-  <genesis-amd-docker-image> \
+  rocm/pytorch:rocm6.4.3_ubuntu24.04_py3.12_pytorch_release_2.6.0 \
   bash
 ```
 
-这是 workshop 期间学员运行训练和评估的容器。
+需要手动安装依赖（第 4 步）。如果容器内 `pip install` 出现 DNS 解析错误，在 `docker run` 命令中添加 `--network=host`。
 
 </details>
 
 <details>
-<summary><b>RDNA4 (R9700) — ROCm 7.2 — 优先用于数据生成 / benchmark 评估</b></summary>
+<summary><b>方案 C：RDNA4 (R9700) — ROCm 7.2 — 优先用于数据生成 / benchmark 评估</b></summary>
 
 ```bash
 docker run --rm -it \
@@ -118,13 +152,15 @@ docker run --rm -it \
 
 > `-it` 参数用于进入交互式 shell，后续步骤都在容器内执行。
 
-### 第 4 步 — 安装依赖（容器内）
+### 第 4 步 — 安装依赖（使用预构建镜像可跳过）
+
+> 如果使用预构建 `workshop-genesis` 镜像（方案 A），**直接跳到第 5 步**——以下所有内容均已内置。
 
 ```bash
 # Python 依赖
 pip install -q git+https://github.com/Genesis-Embodied-AI/Genesis.git@main \
   lerobot==0.4.4 transformers accelerate safetensors \
-  matplotlib Pillow jupyter ipykernel
+  matplotlib Pillow jupyter ipykernel num2words
 
 # 修复 numpy / scikit-image ABI 不兼容（Genesis 要求 numpy==2.1.2）
 pip install --force-reinstall --no-cache-dir -q "scikit-image>=0.22" "numpy==2.1.2"
@@ -135,7 +171,7 @@ apt-get update -qq && apt-get install -y -qq xvfb ffmpeg > /dev/null 2>&1
 
 #### 第 4b 步 — 构建 torchcodec（CPU-only）— 必做
 
-HF 数据集用 AV1 视频存储观测，训练时靠 `torchcodec` 解码。pip wheel 链接 NVIDIA CUDA 库，ROCm 下无法 import。`torchcodec` 的 GPU 解码路径仅支持 NVDEC——AMD 有对等硬件（VCN）但上游尚无 VA-API 后端，所以只能走 CPU `libavcodec`。实际不影响训练性能（视频 I/O 远小于 GPU 前向/反向耗时）。
+HF 数据集用 AV1 视频，训练时靠 `torchcodec` 解码。pip wheel 链接 NVIDIA CUDA 库，ROCm 下无法 import——CPU `libavcodec` 是 AMD 上唯一可用路径，不影响训练性能。
 
 ```bash
 bash setup_torchcodec.sh   # ~3-5 min，克隆 v0.10.0 + CPU-only 构建
@@ -182,6 +218,10 @@ robot_synthetic_data_generation_workshop/
 ├── workshop_pipeline.ipynb          ← ★ Jupyter Notebook（Workshop 主体）
 ├── fix_and_run.sh                   ← 一键执行：安装依赖 + ROCm 补丁 + 运行 notebook
 ├── setup_torchcodec.sh              ← 构建 torchcodec v0.10.0 CPU-only（ROCm 用）
+├── docker/
+│   ├── Dockerfile.workshop          ← 预构建镜像（全部依赖 + Taichi 缓存 + 模型）
+│   ├── build.sh                     ← 构建辅助脚本
+│   └── warmup_cache.py              ← Docker 构建时 Taichi 内核预编译
 ├── images/                          ← 预生成的可视化（notebook 内引用）
 │   ├── ep0_camera_views.png         ← Franka 抓取过程双相机视角
 │   ├── ep0_joint_trajectory.png     ← 9 自由度关节轨迹曲线
@@ -212,6 +252,7 @@ robot_synthetic_data_generation_workshop/
 | `torch` | ≥2.1 (ROCm) | 训练与推理 |
 | `transformers` | ≥4.40 | SmolVLA 骨干网络 (Idefics3) |
 | `accelerate` | 最新 | HuggingFace 模型加载 |
+| `num2words` | 最新 | `transformers` SmolVLM 处理器依赖 |
 | `numpy` | ==2.1.2 | Genesis 依赖，需与 scikit-image 的 C 扩展 ABI 匹配 |
 | `scikit-image` | ≥0.22 | 需在 numpy==2.1.2 下重新编译 |
 | `xvfb` | 系统包 | 无头渲染（apt-get 安装） |
@@ -260,8 +301,10 @@ python scripts/04_eval_custom_scene.py \
   --save /output/eval_kitchen_wrist
 ```
 
+- **先下载厨房资源**：`python scripts/00_download_kitchen.py`（仅首次，~130 MB）。notebook 第 0 节会自动执行；CLI 方式需手动运行。
 - `--camera-layout up_wrist` **必须**与数据集匹配；不传会加载世界固定侧视相机。
 - `--render-cpu`（仅 CDNA3）强制 CPU llvmpipe 路径，成功率会比 GPU 渲染低约 20 pt——详见[附录 A](#附录-a渲染后端--cdna3-vs-rdna4)。
+- MI300 首次 Genesis CPU 编译（`scene.build()`）需 **20-30 分钟**；后续运行复用 Taichi 内核缓存。预构建 Docker 镜像（方案 A）已包含此缓存，无需等待。
 
 </details>
 
