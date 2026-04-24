@@ -314,14 +314,21 @@ def main():
         },
     }
 
-    dataset = LeRobotDataset.create(
-        repo_id=args.repo_id,
-        fps=args.fps,
-        features=features,
-        robot_type="franka",
-        use_videos=(not args.no_videos),
-    )
-    print(f"[gen] LeRobot dataset created: {args.repo_id}")
+    # Try to create dataset, if it exists, load it instead
+    try:
+        dataset = LeRobotDataset.create(
+            repo_id=args.repo_id,
+            fps=args.fps,
+            features=features,
+            robot_type="franka",
+            use_videos=(not args.no_videos),
+        )
+        print(f"[gen] LeRobot dataset created: {args.repo_id}")
+    except FileExistsError:
+        print(f"[gen] Dataset {args.repo_id} already exists, loading existing dataset...")
+        dataset = LeRobotDataset(args.repo_id)
+        print(f"[gen] Loaded existing dataset: {dataset.num_episodes} episodes, {len(dataset)} frames")
+        print(f"[gen] WARNING: Will append new episodes to existing dataset")
 
     # ---- generate episodes ----
     rng = random.Random(args.seed)
