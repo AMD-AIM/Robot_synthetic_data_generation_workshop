@@ -4,7 +4,7 @@
 
 End-to-end pipeline for robot manipulation on **AMD GPUs (ROCm)**: **Synthetic Data Generation → VLA Training → Simulation Evaluation**.
 
-Verified on **CDNA3 (MI300 series)** and **RDNA4 (Radeon AI PRO R9700)**.
+Verified on **CDNA3 (MI300/MI325 series)** and **RDNA4 (Radeon AI PRO R9700)**.
 
 ```
 ┌──────────────────────────┐     ┌─────────────────────┐     ┌─────────────────────┐
@@ -19,30 +19,13 @@ Verified on **CDNA3 (MI300 series)** and **RDNA4 (Radeon AI PRO R9700)**.
      2 cameras (up/side)              train expert + state_proj  randomized cube pos
 ```
 
-**Workshop routing**: the workshop is run on a **CDNA3 (MI300 series)** node for training and evaluation. Data generation is pre-done on RDNA4 and pulled from HuggingFace — you do not need to generate data during the session (a 2-3 episode demo is included in the notebook for illustration). For benchmark-quality evaluation numbers, an RDNA4 node is preferred because MI300 falls back to CPU rasterization and introduces a systematic ~20 pt success-rate bias (see [Appendix A](#appendix-a-rendering-backend--cdna3-vs-rdna4)).
+**Workshop routing**: the workshop is run on a **CDNA3 (MI300/MI325 series)** node for training and evaluation. Data generation is pre-done on RDNA4 and pulled from HuggingFace — you do not need to generate data during the session (a 2-3 episode demo is included in the notebook for illustration). For benchmark-quality evaluation numbers, an RDNA4 node is preferred because MI300/MI325 falls back to CPU rasterization and introduces a systematic ~20 pt success-rate bias (see [Appendix A](#appendix-a-rendering-backend--cdna3-vs-rdna4)).
 
 ---
 
-## Dataset (Quick Path)
+## Dataset
 
-The workshop's primary dataset is pre-generated on RDNA4 and published on HuggingFace. **You are not expected to run data generation during the workshop** — pull the dataset and go straight to training:
-
-```bash
-pip install lerobot==0.4.4 torchcodec
-
-python scripts/02_train_vla.py \
-  --dataset-id lidavidsh/franka-pick-kitchen-up-wrist-100ep-genesis \
-  --n-steps 4000 --batch-size 4 --num-workers 4 \
-  --save-dir outputs/smolvla_kitchen_wrist
-```
-
-Or load directly in Python:
-
-```python
-from lerobot.datasets.lerobot_dataset import LeRobotDataset
-dataset = LeRobotDataset("lidavidsh/franka-pick-kitchen-up-wrist-100ep-genesis")
-print(f"Episodes: {dataset.meta.total_episodes}, Frames: {len(dataset)}")
-```
+The training dataset is pre-generated on RDNA4 and published on [HuggingFace](https://huggingface.co/datasets/lidavidsh/franka-pick-kitchen-up-wrist-100ep-genesis). The pre-built Docker image already caches it:
 
 | Item | Value |
 |---|---|
@@ -52,59 +35,65 @@ print(f"Episodes: {dataset.meta.total_episodes}, Frames: {len(dataset)}")
 | Size | ~200 MB (AV1 video, LeRobot v3.0) |
 | Action space | 9-DoF joint position (7 arm + 2 finger) |
 | Generated on | RDNA4 (Radeon AI PRO R9700), Genesis 0.4.5, `seed=42` |
-| HF repo | [`lidavidsh/franka-pick-kitchen-up-wrist-100ep-genesis`](https://huggingface.co/datasets/lidavidsh/franka-pick-kitchen-up-wrist-100ep-genesis) |
 
-> ⚠️ The tensor key `observation.images.side` in this dataset stores the **wrist (eye-in-hand) camera**, not a world-fixed side view. Do not concat / mixed-train with the legacy `lidavidsh/franka-pick-kitchen-100ep-genesis` (up + world-side) — key names collide but semantics differ.
+> ⚠️ The tensor key `observation.images.side` stores the **wrist (eye-in-hand) camera**, not a world-fixed side view. Do not mix with the legacy `up+world-side` dataset — key names collide but semantics differ.
 
 ---
 
-## Quick Start (Full Pipeline)
+## Teacher / Admin Setup
 
-The entire workshop is driven by `workshop_pipeline.ipynb`, running inside a Docker container on a remote AMD GPU node.
+> **This section is for instructors and cluster admins only.** Students skip straight to [Student Quick Start](#student-quick-start).
 
-The notebook ships with pre-generated visualizations (in `images/`), so you can read through the pipeline even without executing it.
-
-### Step 1 — SSH into the GPU node
-
-```bash
-ssh -A <your-user>@<gpu-node>
-```
-
-### Step 2 — Clone the repository
+On each GPU node, run once before the workshop:
 
 ```bash
 git clone git@github.com:<org>/Robot_synthetic_data_generation_workshop.git
 cd Robot_synthetic_data_generation_workshop
+
+# 1. Build the Docker image (~40 min, includes deps + Taichi cache + model/dataset)
+bash docker/build.sh                    # → workshop-genesis:latest
+
+# 2. (Optional) Pre-download HF assets to host — useful if bind-mounts shadow the image cache
+export HF_CACHE=/data/hf_cache          # local SSD or shared NFS mount
+mkdir -p $HF_CACHE
+HF_HOME=$HF_CACHE python -c "
+from huggingface_hub import snapshot_download
+snapshot_download('lerobot/smolvla_base')
+snapshot_download('lidavidsh/franka-pick-kitchen-up-wrist-100ep-genesis', repo_type='dataset')
+"
 ```
 
-### Step 3 — Launch a Docker container
+The Docker image bakes in all Python deps, torchcodec (CPU-only), SmolVLA base model, HF dataset, and pre-compiled Taichi kernels. Step 2 is only needed when bind-mounts shadow the image's internal cache. For multi-node clusters, repeat on each node or point `HF_CACHE` at a shared NFS/Lustre path.
 
-<details open>
-<summary><b>Option A: Pre-built workshop image (recommended for class)</b></summary>
-
-The pre-built image includes all Python/system dependencies, torchcodec (CPU-only), SmolVLA base model, HF dataset cache, and pre-compiled Taichi kernels. Students can skip Step 4 entirely and go straight to Step 5.
+### Launch the container
 
 ```bash
 docker run --rm -it \
   --device=/dev/kfd --device=/dev/dri --group-add video --ipc=host \
   --network=host \
   -v $(pwd):/workspace/workshop \
-  -v /tmp/workshop_output:/output \
+  -v ${HF_CACHE}:/root/.cache/huggingface \
+  -e HF_HUB_OFFLINE=1 \
   -w /workspace/workshop \
   workshop-genesis:latest \
   bash
 ```
 
-> On CDNA3 (MI300) nodes, add `-e HSA_OVERRIDE_GFX_VERSION=9.4.2` to the `docker run` command. RDNA4 does not need this.
+> On CDNA3 (MI325/MI300) nodes, add `-e HSA_OVERRIDE_GFX_VERSION=9.4.2`. RDNA4 does not need this.
 
-Build the image once per cluster (takes ~40 min, most of it is Taichi CPU kernel warmup):
+### Start Jupyter
 
 ```bash
-# Default: ROCm 7.2 base (verified on both CDNA3 and RDNA4)
-bash docker/build.sh                             # → workshop-genesis:latest
-bash docker/build.sh my-registry/workshop:v1     # custom tag for push
+jupyter notebook --ip=0.0.0.0 --port=8888 --no-browser --allow-root
+```
 
-# Alternative: ROCm 6.4.3 base (if nodes only have ROCm 6.x driver)
+Students access the notebook via [notebooks.amd.com](https://notebooks.amd.com). All outputs are written to `output/` under the workshop directory, visible in the Jupyter file browser.
+
+<details>
+<summary><b>Alternative base images</b></summary>
+
+```bash
+# ROCm 6.4.3 base (if nodes only have ROCm 6.x driver)
 BASE_IMAGE=rocm/pytorch:rocm6.4.3_ubuntu24.04_py3.12_pytorch_release_2.6.0 \
   bash docker/build.sh workshop-mi300:latest
 ```
@@ -114,88 +103,47 @@ See [`docker/Dockerfile.workshop`](docker/Dockerfile.workshop) for what's baked 
 </details>
 
 <details>
-<summary><b>Option B: Base ROCm image — CDNA3 (MI300 series) — manual setup</b></summary>
+<summary><b>Manual setup (without pre-built image)</b></summary>
+
+If the pre-built image is not available, launch a base ROCm container:
 
 ```bash
+# CDNA3 (MI325/MI300)
 docker run --rm -it \
   --device=/dev/kfd --device=/dev/dri --group-add video --ipc=host \
-  -e PYOPENGL_PLATFORM=egl \
-  -e HSA_OVERRIDE_GFX_VERSION=9.4.2 \
+  --network=host \
+  -e PYOPENGL_PLATFORM=egl -e HSA_OVERRIDE_GFX_VERSION=9.4.2 \
   -v $(pwd):/workspace/workshop \
-  -v /tmp/workshop_output:/output \
-  -v ~/.cache/huggingface:/root/.cache/huggingface \
   -w /workspace/workshop \
-  rocm/pytorch:rocm6.4.3_ubuntu24.04_py3.12_pytorch_release_2.6.0 \
-  bash
+  rocm/pytorch:rocm6.4.3_ubuntu24.04_py3.12_pytorch_release_2.6.0 bash
+
+# RDNA4 — use rocm7.2 image and drop HSA_OVERRIDE_GFX_VERSION
 ```
 
-This requires manual dependency installation (Step 4). If `pip install` fails with DNS errors inside the container, add `--network=host` to the `docker run` command.
-
-</details>
-
-<details>
-<summary><b>Option C: RDNA4 (R9700) — ROCm 7.2 — preferred for data generation / benchmark eval</b></summary>
+Then install dependencies manually:
 
 ```bash
-docker run --rm -it \
-  --device=/dev/kfd --device=/dev/dri --group-add video --ipc=host \
-  -e PYOPENGL_PLATFORM=egl \
-  -v $(pwd):/workspace/workshop \
-  -v /tmp/workshop_output:/output \
-  -v ~/.cache/huggingface:/root/.cache/huggingface \
-  -w /workspace/workshop \
-  rocm/pytorch:rocm7.2_ubuntu24.04_py3.12_pytorch_release_2.9.1 \
-  bash
-```
-
-> RDNA4 does not need `HSA_OVERRIDE_GFX_VERSION` — ROCm 7.2 natively supports gfx1201. RDNA4 has full graphics pipeline (radeonsi hardware rasterization), which is why data generation is ~3-4× faster and evaluation success rate does not suffer the CPU-render bias that affects MI300.
-
-</details>
-
-> The `-it` flag gives you an interactive shell. All subsequent steps run inside this container.
-
-### Step 4 — Install dependencies (skip if using pre-built image)
-
-> If you launched with the pre-built `workshop-genesis` image (Option A), **skip to Step 5** — everything below is already baked in.
-
-```bash
-# Python packages
 pip install -q git+https://github.com/Genesis-Embodied-AI/Genesis.git@main \
   lerobot==0.4.4 transformers accelerate safetensors \
   matplotlib Pillow jupyter ipykernel num2words
-
-# Fix numpy / scikit-image ABI mismatch (Genesis requires numpy==2.1.2)
 pip install --force-reinstall --no-cache-dir -q "scikit-image>=0.22" "numpy==2.1.2"
-
-# System packages for headless rendering and video encoding
 apt-get update -qq && apt-get install -y -qq xvfb ffmpeg > /dev/null 2>&1
+bash setup_torchcodec.sh   # ~3-5 min, CPU-only torchcodec (required for AV1 dataset)
 ```
 
-#### Step 4b — Build torchcodec (CPU-only) — REQUIRED
+Or run `bash fix_and_run.sh` to do everything in one shot.
 
-The HF dataset uses AV1 video; `torchcodec` decodes it at training time. The pip wheel links NVIDIA CUDA libs and won't import on ROCm — CPU `libavcodec` is the only working path on AMD. This is not a training bottleneck.
+</details>
 
-```bash
-bash setup_torchcodec.sh   # ~3-5 min, clones v0.10.0 + builds CPU-only
-```
+---
 
-Skipping this will crash the HF dataset load (Section 1c) and training (Section 2).
+## Student Quick Start
 
-> You can also run `bash fix_and_run.sh` to do all of the above in one shot and execute the notebook automatically. However, we recommend launching Jupyter manually and running cells one by one to understand the pipeline.
+1. Go to [notebooks.amd.com](https://notebooks.amd.com) and log in
+2. Open `workshop_pipeline.ipynb`
+3. Run cells in order — everything is pre-installed
 
-### Step 5 — Start Jupyter Notebook
-
-```bash
-jupyter notebook --ip=0.0.0.0 --port=8888 --no-browser --allow-root
-```
-
-Open an SSH tunnel from your local machine:
-
-```bash
-ssh -L 8888:localhost:8888 <your-user>@<gpu-node>
-```
-
-Then open `http://localhost:8888` in your browser and navigate to `workshop_pipeline.ipynb`. Run cells in order.
+All outputs (checkpoints, plots, eval videos) are written to `output/` in the file browser.
 
 ---
 
@@ -236,6 +184,14 @@ robot_synthetic_data_generation_workshop/
 │   └── kitchen_wrist/              ← kitchen scene up + wrist camera sample frames
 ├── scenes/
 │   └── rustic_kitchen.json          ← kitchen scene config (anchors, mesh refs)
+├── output/                          ← all runtime outputs (created by notebook / scripts)
+│   ├── data/                        ← data generation sidecars (gen_summary.json, etc.)
+│   │   ├── franka_gen_pick/
+│   │   └── custom_scene_gen/
+│   ├── train/                       ← training checkpoints + metrics
+│   │   └── smolvla_kitchen_wrist/   ← final/, checkpoint_*, train_summary.json
+│   └── eval/                        ← evaluation results + videos
+│       └── kitchen_eval/            ← eval_summary.json, videos/
 └── scripts/
     ├── 00_download_kitchen.py       ← download kitchen GLB assets
     ├── 01_gen_data.py               ← data generation (flat scene, legacy / reference)
@@ -265,7 +221,7 @@ robot_synthetic_data_generation_workshop/
 | `xvfb` | system | Headless rendering (apt-get install) |
 | `ffmpeg` | system | Video encoding (apt-get install) |
 
-**Hardware**: CDNA3 (AMD Instinct MI300 series, ROCm 6.x) **or** RDNA4 (AMD Radeon AI PRO R9700, ROCm 7.2); ≥4 GB VRAM on either.
+**Hardware**: CDNA3 (AMD Instinct MI300/MI325 series, ROCm 6.x) **or** RDNA4 (AMD Radeon AI PRO R9700, ROCm 7.2); ≥4 GB VRAM on either.
 
 ---
 
@@ -278,11 +234,11 @@ robot_synthetic_data_generation_workshop/
 python scripts/02_train_vla.py \
   --dataset-id lidavidsh/franka-pick-kitchen-up-wrist-100ep-genesis \
   --n-steps 4000 --batch-size 4 --num-workers 4 \
-  --save-dir /output/outputs/workshop_smolvla_kitchen_wrist
+  --run-name smolvla_kitchen_wrist
 ```
 
 - AMP BF16 + PyTorch SDPA auto-dispatch (AOTriton flash on AMD) are **auto-enabled** when CUDA is available — no flags needed.
-- `--num-workers 4` requires the CPU-only torchcodec build (see [Step 4b](#step-4b--build-torchcodec-cpu-only--required)).
+- `--num-workers 4` requires the CPU-only torchcodec build (included in the pre-built image; see manual setup for details).
 
 </details>
 
@@ -290,28 +246,27 @@ python scripts/02_train_vla.py \
 <summary><b>Evaluation (04_eval_custom_scene.py)</b></summary>
 
 ```bash
-# CDNA3 (MI300) — must use --render-cpu (no GPU graphics driver)
+# CDNA3 (MI300/MI325) — must use --render-cpu (no GPU graphics driver)
 python scripts/04_eval_custom_scene.py \
-  --checkpoint /output/outputs/workshop_smolvla_kitchen_wrist/final \
+  --checkpoint output/train/smolvla_kitchen_wrist/final \
   --dataset-id lidavidsh/franka-pick-kitchen-up-wrist-100ep-genesis \
   --scene rustic_kitchen --anchor floor_origin \
   --camera-layout up_wrist --render-cpu \
-  --n-episodes 20 --seed 99 --record-video \
-  --save /output/eval_kitchen_wrist
+  --n-episodes 20 --seed 99 --record-video
 
 # RDNA4 — omit --render-cpu, uses GPU radeonsi
 python scripts/04_eval_custom_scene.py \
-  --checkpoint ... --dataset-id ... \
+  --checkpoint output/train/smolvla_kitchen_wrist/final \
+  --dataset-id lidavidsh/franka-pick-kitchen-up-wrist-100ep-genesis \
   --scene rustic_kitchen --anchor floor_origin \
   --camera-layout up_wrist \
-  --n-episodes 20 --seed 99 --record-video \
-  --save /output/eval_kitchen_wrist
+  --n-episodes 20 --seed 99 --record-video
 ```
 
 - **Download kitchen assets first**: `python scripts/00_download_kitchen.py` (one-time, ~130 MB). The notebook does this automatically in Section 0; for CLI usage, run it manually before eval.
 - `--camera-layout up_wrist` **must** match the dataset; omitting it loads a world-fixed side camera.
 - `--render-cpu` (CDNA3 only) forces CPU llvmpipe; introduces ~20 pt success-rate bias vs GPU rendering — see [Appendix A](#appendix-a-rendering-backend-cdna3-vs-rdna4).
-- First-time Genesis CPU compilation (`scene.build()`) takes **20-30 min** on MI300; subsequent runs reuse the Taichi kernel cache. The pre-built Docker image (Option A) already includes this cache — no wait.
+- First-time Genesis CPU compilation (`scene.build()`) takes **20-30 min** on MI300/MI325; subsequent runs reuse the Taichi kernel cache. The pre-built Docker image (Option A) already includes this cache — no wait.
 
 </details>
 
@@ -323,8 +278,7 @@ python scripts/02_gen_data_custom_scene.py \
   --scene rustic_kitchen --anchor floor_origin \
   --camera-layout up_wrist \
   --n-episodes 100 --seed 42 \
-  --repo-id local/kitchen-pick \
-  --save /output
+  --repo-id local/kitchen-pick
 ```
 
 </details>
@@ -340,7 +294,7 @@ All numbers below are from the workshop main path (`kitchen-up-wrist`, 100 ep da
 | Architecture | Success Rate | Per-episode |
 |---|:---:|:---:|
 | RDNA4 (R9700) | 100/100 | **~14 s/ep** (Genesis compile + video encode included, ~12 s/ep steady state) |
-| CDNA3 (MI300) | 100/100 | ~4× slower due to CPU rasterization |
+| CDNA3 (MI300/MI325) | 100/100 | ~4× slower due to CPU rasterization |
 
 100-episode wall clock on RDNA4: **~23 min** end-to-end including Genesis scene compile and SVT-AV1 encode.
 
@@ -348,7 +302,7 @@ All numbers below are from the workshop main path (`kitchen-up-wrist`, 100 ep da
 
 Default recipe = Video dataset + `num-workers=4` + AMP BF16 + PyTorch SDPA auto (AOTriton flash on AMD). AMP + SDPA are auto-enabled by `02_train_vla.py` when CUDA is available.
 
-| Metric | RDNA4 (R9700, ROCm 7.2) | CDNA3 (MI300, ROCm 6.4.3) |
+| Metric | RDNA4 (R9700, ROCm 7.2) | CDNA3 (MI300/MI325, ROCm 6.4.3) |
 |---|:---:|:---:|
 | Wall time | **~7.4 min** (444 s) | **~10.6 min** (637 s) |
 | Per-step | 0.111 s | 0.159 s |
@@ -361,15 +315,15 @@ Default recipe = Video dataset + `num-workers=4` + AMP BF16 + PyTorch SDPA auto 
 
 Success rate is sensitive both to the training stack and to the evaluation renderer. The 2×2 matrix below isolates both axes using the same 100-episode dataset and the same default training recipe:
 
-| train \ eval render | **MI300 CPU (llvmpipe)** | **RDNA4 GPU (radeonsi)** |
+| train \ eval render | **MI300/MI325 CPU (llvmpipe)** | **RDNA4 GPU (radeonsi)** |
 |---|:---:|:---:|
 | CDNA3 (ROCm 6.4 + PyTorch 2.6) | 25.0 % | 45.0 % |
 | RDNA4 (ROCm 7.2 + PyTorch 2.9) | — (not tested) | **48.0 %** |
 
 Key takeaways:
 
-1. **Eval renderer dominates**: same checkpoint, CPU → GPU eval lifts success rate ~20 pt (25 % → 45 %). MI300 evaluation numbers are systematically low; for benchmark-quality results, evaluate on RDNA4 or another GPU-render node.
-2. **Training stack is equivalent**: CDNA3-trained and RDNA4-trained checkpoints score 45 % vs 48 % under matched GPU eval — within eval standard deviation (~10 pt). MI300 is a fully usable training node.
+1. **Eval renderer dominates**: same checkpoint, CPU → GPU eval lifts success rate ~20 pt (25 % → 45 %). MI300/MI325 evaluation numbers are systematically low; for benchmark-quality results, evaluate on RDNA4 or another GPU-render node.
+2. **Training stack is equivalent**: CDNA3-trained and RDNA4-trained checkpoints score 45 % vs 48 % under matched GPU eval — within eval standard deviation (~10 pt). MI300/MI325 is a fully usable training node.
 3. **Per-seed spread is large**: individual eval seeds span 35-60 %; always report pooled or mean ± std over ≥3 eval seeds.
 
 ---
@@ -402,21 +356,21 @@ Eval Loop:                                                    │              �
 
 | Architecture | EGL Renderer | Type |
 |---|---|---|
-| CDNA3 (MI300 series) | llvmpipe | CPU software rasterization |
+| CDNA3 (MI300/MI325 series) | llvmpipe | CPU software rasterization |
 | RDNA4 (R9700) | radeonsi | **GPU hardware rasterization** |
 
 CDNA3 has no graphics pipeline — Genesis falls back to CPU `llvmpipe` for camera rendering. RDNA4 has a full graphics pipeline (`radeonsi`, hardware-accelerated), which is the primary source of the 3-4× data-generation speedup and eliminates the render-gap bias at evaluation.
 
-**CPU-render evaluation bias (MI300)**: CPU and GPU rasterizers produce visually different frames. A policy trained on GPU-rendered data but evaluated with CPU rendering shows a systematic **~20 pt lower success rate**. On the kitchen+wrist main path: RDNA4 GPU eval pooled ~45-48 % vs MI300 CPU eval pooled ~25 %. This is expected behaviour, not a bug. For benchmark-quality numbers, evaluate on an RDNA4 or another GPU-render node.
+**CPU-render evaluation bias (MI300/MI325)**: CPU and GPU rasterizers produce visually different frames. A policy trained on GPU-rendered data but evaluated with CPU rendering shows a systematic **~20 pt lower success rate**. On the kitchen+wrist main path: RDNA4 GPU eval pooled ~45-48 % vs MI300/MI325 CPU eval pooled ~25 %. This is expected behaviour, not a bug. For benchmark-quality numbers, evaluate on an RDNA4 or another GPU-render node.
 
 ## Appendix B: Known Compatibility Notes
 
 | Issue | Fix | Auto-handled by |
 |---|---|---|
-| Genesis PyPI 0.4.5 imports `cuda.bindings` (missing on ROCm) | Install from `main` branch (fixed in [`e807698`](https://github.com/Genesis-Embodied-AI/Genesis/commit/e807698b8aa773fad3a6dfb4556889b251c30924)) | Step 4 / `fix_and_run.sh` |
-| numpy / scikit-image ABI mismatch (`numpy.dtype size changed`) | `pip install --force-reinstall "scikit-image>=0.22" "numpy==2.1.2"` | Step 4 / `fix_and_run.sh` |
-| torchcodec pip wheel links CUDA libs, fails on ROCm | `bash setup_torchcodec.sh` (CPU-only build) | Step 4b / `fix_and_run.sh` |
-| `lerobot>=0.5.0` dataclass ordering error with SmolVLAConfig | Pin `lerobot==0.4.4` | Step 4 / `fix_and_run.sh` |
+| Genesis PyPI 0.4.5 imports `cuda.bindings` (missing on ROCm) | Install from `main` branch (fixed in [`e807698`](https://github.com/Genesis-Embodied-AI/Genesis/commit/e807698b8aa773fad3a6dfb4556889b251c30924)) | Dockerfile / `fix_and_run.sh` |
+| numpy / scikit-image ABI mismatch (`numpy.dtype size changed`) | `pip install --force-reinstall "scikit-image>=0.22" "numpy==2.1.2"` | Dockerfile / `fix_and_run.sh` |
+| torchcodec pip wheel links CUDA libs, fails on ROCm | `bash setup_torchcodec.sh` (CPU-only build) | Dockerfile / `fix_and_run.sh` |
+| `lerobot>=0.5.0` dataclass ordering error with SmolVLAConfig | Pin `lerobot==0.4.4` | Dockerfile / `fix_and_run.sh` |
 
 ---
 

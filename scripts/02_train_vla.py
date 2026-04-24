@@ -40,7 +40,9 @@ def main():
     ap.add_argument("--n-steps", type=int, default=2000)
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--lr", type=float, default=None, help="Override learning rate")
-    ap.add_argument("--save-dir", default="outputs/smolvla_pick_phase1")
+    ap.add_argument("--output-dir", default="./output")
+    ap.add_argument("--run-name", default="smolvla_pick",
+                    help="Subfolder under output-dir/train/ for this run")
     ap.add_argument("--log-every", type=int, default=50)
     ap.add_argument("--save-every", type=int, default=500)
     ap.add_argument(
@@ -166,7 +168,7 @@ def main():
     print(f"[train] optimizer: AdamW lr={lr}")
 
     # ---- training loop ----
-    save_dir = Path(args.save_dir)
+    save_dir = Path(args.output_dir) / "train" / args.run_name
     save_dir.mkdir(parents=True, exist_ok=True)
 
     metrics_log = []

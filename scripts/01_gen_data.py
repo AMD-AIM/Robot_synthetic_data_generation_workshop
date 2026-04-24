@@ -86,7 +86,7 @@ def main():
     ap = argparse.ArgumentParser(description="Franka pick-cube data generation")
     ap.add_argument("--n-episodes", type=int, default=10)
     ap.add_argument("--repo-id", default="local/franka-genesis-pick")
-    ap.add_argument("--save", default="/output")
+    ap.add_argument("--output-dir", default="./output")
     ap.add_argument("--cpu", action="store_true")
     ap.add_argument("--fps", type=int, default=30)
     ap.add_argument("--cube-x-min", type=float, default=0.4)
@@ -334,7 +334,7 @@ def main():
         cy = rng.uniform(y_range[0], y_range[1])
         episode_points.append((cx, cy))
 
-    out_dir = Path(args.save) / "franka_gen_pick"
+    out_dir = Path(args.output_dir) / "data" / "franka_gen_pick"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"[gen] cube x_range={x_range}, y_range={y_range}")

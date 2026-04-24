@@ -51,7 +51,7 @@ def main():
     # Dataset args (same as 01_gen_data.py)
     ap.add_argument("--n-episodes", type=int, default=10)
     ap.add_argument("--repo-id", default="local/kitchen-pick")
-    ap.add_argument("--save", default="./output")
+    ap.add_argument("--output-dir", default="./output")
     ap.add_argument("--fps", type=int, default=30)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--task", default="Pick up the cube.")
@@ -242,7 +242,7 @@ def main():
         world_pos = to_world(base_xy, yaw_rad, surface_z, (dx, dy, cube_half_z))
         episode_points.append((dx, dy, world_pos))
 
-    out_dir = Path(args.save) / "custom_scene_gen"
+    out_dir = Path(args.output_dir) / "data" / "custom_scene_gen"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"[gen] scene={args.scene} anchor={args.anchor}")

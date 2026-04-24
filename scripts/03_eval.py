@@ -8,11 +8,10 @@ Supports:
   - Warm-start from dataset (--warm-start-from-dataset)
 
 Usage:
-  python 02_franka_eval.py \
-    --checkpoint /output/outputs/franka_bc/final.pt \
+  python 03_eval.py \
+    --checkpoint output/train/smolvla_pick/final \
     --dataset-id local/franka-genesis-pick \
-    --n-episodes 10 --max-steps 150 \
-    --save /output/franka_eval_bc
+    --n-episodes 10 --max-steps 150
 """
 from __future__ import annotations
 
@@ -163,7 +162,9 @@ def main():
     ap.add_argument("--prefix-gt-steps", type=int, default=0,
                     help="Inject GT action for the first K steps only, then free-fly "
                          "(0=disabled, requires --warm-start-from-dataset)")
-    ap.add_argument("--save", default="/output/franka_eval")
+    ap.add_argument("--output-dir", default="./output")
+    ap.add_argument("--run-name", default="franka_eval",
+                    help="Subfolder under output-dir/eval/ for this run")
     ap.add_argument("--record-video", action="store_true")
     ap.add_argument("--task", type=str, default="Pick up the red cube.",
                     help="Language instruction for VLA models (e.g. SmolVLA)")
@@ -576,7 +577,7 @@ def main():
     if args.prefix_gt_steps > 0:
         print(f"  prefix_gt_steps={args.prefix_gt_steps}")
 
-    save_dir = Path(args.save)
+    save_dir = Path(args.output_dir) / "eval" / args.run_name
     save_dir.mkdir(parents=True, exist_ok=True)
 
     # ---- episode loop ----

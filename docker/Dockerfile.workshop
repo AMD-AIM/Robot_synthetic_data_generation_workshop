@@ -21,7 +21,8 @@ RUN apt-get update -qq && \
 RUN pip install --no-cache-dir -q \
     git+https://github.com/Genesis-Embodied-AI/Genesis.git@main \
     lerobot==0.4.4 transformers accelerate safetensors \
-    matplotlib Pillow jupyter ipykernel num2words pybind11 && \
+    matplotlib Pillow jupyter ipykernel num2words pybind11 \
+    "rerun-sdk[notebook]" && \
     pip install --no-cache-dir --force-reinstall -q \
         "scikit-image>=0.22" "numpy==2.1.2"
 

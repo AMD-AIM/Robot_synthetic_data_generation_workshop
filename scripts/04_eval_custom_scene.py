@@ -9,11 +9,10 @@ Default: rustic_kitchen scene with floor_origin anchor.
 Usage:
     python 04_eval_custom_scene.py \
         --policy-type smolvla \
-        --checkpoint /output/outputs/kitchen_smolvla/final \
+        --checkpoint output/train/smolvla_kitchen_wrist/final \
         --dataset-id local/kitchen-pick \
         --n-episodes 10 --max-steps 150 --seed 99 \
-        --record-video \
-        --save /output/kitchen_eval_unseen
+        --record-video
 """
 from __future__ import annotations
 
@@ -132,7 +131,9 @@ def main():
     ap.add_argument("--success-final-m", type=float, default=0.01)
 
     # Output
-    ap.add_argument("--save", default="/output/kitchen_eval")
+    ap.add_argument("--output-dir", default="./output")
+    ap.add_argument("--run-name", default="kitchen_eval",
+                    help="Subfolder under output-dir/eval/ for this run")
     ap.add_argument("--record-video", action="store_true")
     ap.add_argument(
         "--render-cpu",
@@ -435,7 +436,7 @@ def main():
           f"surface_z={surface_z:.3f}")
     print(f"[eval] {args.n_episodes} episodes, max_steps={args.max_steps}")
 
-    save_dir = Path(args.save)
+    save_dir = Path(args.output_dir) / "eval" / args.run_name
     save_dir.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------
