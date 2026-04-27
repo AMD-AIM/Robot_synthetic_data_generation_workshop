@@ -28,7 +28,8 @@ RUN pip install --no-cache-dir -q \
 
 # ── torchcodec CPU-only build ────────────────────────────────────────────
 ARG TORCHCODEC_VERSION=v0.10.0
-RUN git clone --depth 1 --branch ${TORCHCODEC_VERSION} \
+RUN export PYTORCH_ROCM_ARCH="gfx942" && \
+    git clone --depth 1 --branch ${TORCHCODEC_VERSION} \
         https://github.com/pytorch/torchcodec.git /tmp/torchcodec && \
     TORCH_CMAKE="$(python -c 'import torch; print(torch.utils.cmake_prefix_path)')/Torch" && \
     PYBIND11_CMAKE="$(python -c 'import pybind11; print(pybind11.get_cmake_dir())')" && \
@@ -59,6 +60,22 @@ snapshot_download('lidavidsh/franka-pick-kitchen-up-wrist-100ep-genesis', repo_t
 
 # ── Warm up Taichi CPU kernel cache (the 20-30 min compile) ──────────────
 RUN xvfb-run -a python docker/warmup_cache.py
+
+# ── Pre-create local demo datasets (prevents race conditions in workshop) ─
+RUN xvfb-run -a python scripts/01_gen_data.py \
+        --n-episodes 2 \
+        --repo-id local/workshop-flat-demo \
+        --seed 42 \
+        --no-videos && \
+    xvfb-run -a python scripts/02_gen_data_custom_scene.py \
+        --scene rustic_kitchen \
+        --anchor floor_origin \
+        --camera-layout up_wrist \
+        --n-episodes 2 \
+        --repo-id local/workshop-kitchen-wrist-demo \
+        --seed 42 \
+        --no-videos \
+        --task 'Pick up the red cube.'
 
 # ── Students bind-mount their repo to /workspace/workshop ────────────────
 WORKDIR /workspace/workshop
