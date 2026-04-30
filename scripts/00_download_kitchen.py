@@ -4,12 +4,12 @@ Download free Rustic Kitchen assets from World Labs Marble.
 Downloads all exportable assets for the Rustic Kitchen scene:
   - HQ mesh GLB   (~600k triangles, textures) -> Genesis visual layer
   - Collider GLB   (~100-200k triangles)       -> Genesis collision layer
-  - Gaussian Splat PLY (2M splats)             -> for Isaac Sim / offline viz
+  - Gaussian Splat PLY (2M splats)             -> for future GS rendering
   - 360 Panorama PNG  (2560x1280)             -> reference / skybox
 
-Genesis can only render meshes (GLB); the Gaussian Splat PLY is downloaded
-for future use with Isaac Sim (PLY -> USDZ via 3DGRUT) or standalone viewers
-like Spark (https://sparkjs.dev/).
+Genesis currently only renders meshes (GLB); the Gaussian Splat PLY is
+downloaded for future use when Genesis adds native GS rendering support,
+or for standalone viewers like Spark (https://sparkjs.dev/).
 
 Reference: https://docs.worldlabs.ai/marble/export/specs#example-files
 
@@ -93,7 +93,7 @@ def main() -> None:
         download_file(url, dest, force=args.force)
 
     if not args.mesh_only:
-        print("\n--- Gaussian Splat + Panorama (for Isaac Sim / offline viz) ---")
+        print("\n--- Gaussian Splat + Panorama (for future GS rendering / offline viz) ---")
         for filename, url in SPLAT_ASSETS.items():
             dest = args.asset_dir / filename
             download_file(url, dest, force=args.force)
@@ -102,7 +102,7 @@ def main() -> None:
 
     print("\nDone. Files ready for 01_inspect_scene.py / 03_pick_cube.py")
     print("  Mesh GLB -> Genesis (visual + collision)")
-    print("  Splat PLY -> Isaac Sim (PLY -> USDZ via 3DGRUT) or Spark viewer")
+    print("  Splat PLY -> future Genesis GS rendering or Spark viewer")
 
 
 if __name__ == "__main__":
