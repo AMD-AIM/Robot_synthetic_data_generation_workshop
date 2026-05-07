@@ -4,7 +4,7 @@
 
 End-to-end pipeline for robot manipulation on **AMD GPUs (ROCm)**: **Synthetic Data Generation → VLA Training → Simulation Evaluation**.
 
-Verified on **CDNA3 (MI300/MI325 series)** and **RDNA4 (Radeon AI PRO R9700)**.
+Verified on **CDNA3 (MI300/MI325 series)**, **RDNA4 (Radeon AI PRO R9700)**, and **RDNA3.5 (Radeon PRO W7900)**.
 
 ```
 ┌──────────────────────────┐     ┌─────────────────────┐     ┌─────────────────────┐
@@ -19,7 +19,88 @@ Verified on **CDNA3 (MI300/MI325 series)** and **RDNA4 (Radeon AI PRO R9700)**.
      2 cameras (up/side)              train expert + state_proj  randomized cube pos
 ```
 
-**Workshop routing**: the workshop is run on a **CDNA3 (MI300/MI325 series)** node for training and evaluation. Data generation is pre-done on RDNA4 and pulled from HuggingFace — you do not need to generate data during the session (a 2-3 episode demo is included in the notebook for illustration). For benchmark-quality evaluation numbers, an RDNA4 node is preferred because MI300/MI325 falls back to CPU rasterization and introduces a systematic ~20 pt success-rate bias (see [Appendix A](#appendix-a-rendering-backend--cdna3-vs-rdna4)).
+---
+
+## Workshop Routing — Two Paths
+
+| | Path A: CDNA3 (MI300/MI325) | Path B: RDNA4/3.5 (R9700 / W7900) |
+|---|---|---|
+| **Data Generation** | Skip — use pre-built HuggingFace dataset | **End-to-end** `01_gen_data.py` (100 episodes) |
+| **Training** | Local training | Local training |
+| **Evaluation** | CPU render (llvmpipe), ~20 pt lower success rate | GPU render (radeonsi), benchmark-quality |
+| **Total time** | ~20 min (train + eval) | **~30 min** (gen + train + eval) |
+
+---
+
+## Path A: CDNA3 (MI300/MI325) — Pre-built Dataset
+
+For MI300/MI325 nodes without GPU graphics pipeline. The 100-episode dataset is pre-generated on RDNA4 and pulled from HuggingFace.
+
+### Student Quick Start
+
+1. Go to [notebooks.amd.com](https://notebooks.amd.com) and log in
+2. Open `workshop_cdna3.ipynb`
+3. Run cells in order — everything is pre-installed
+
+---
+
+## Path B: RDNA4/3.5 (R9700 / W7900) — End-to-End
+
+For RDNA nodes with GPU graphics pipeline. **All three steps run live during the workshop** — no external dataset needed.
+
+### Model Weights
+
+SmolVLA models are downloaded from [ModelScope](https://modelscope.cn) (China-friendly mirror):
+
+| Model | ModelScope URL |
+|---|---|
+| SmolVLA base (450M) | https://modelscope.cn/models/lerobot/smolvla_base |
+| SmolVLM2-500M backbone | https://modelscope.cn/models/HuggingFaceTB/SmolVLM2-500M-Video-Instruct |
+
+> The pre-built image `workshop-genesis:rocm7.2_w7900_ready` already caches both models. Students do not need to download manually.
+
+### Student Quick Start
+
+```bash
+docker exec -it workshop-genesis bash
+
+# Step 1: Data Generation (~15 min)
+python scripts/01_gen_data.py --n-episodes 100 --repo-id local/franka-genesis-pick-100ep
+
+# Step 2: Training (~7-11 min)
+python scripts/02_train_vla.py \
+  --dataset-id local/franka-genesis-pick-100ep \
+  --pretrained lerobot/smolvla_base \
+  --n-steps 4000 --batch-size 4 --num-workers 4 \
+  --run-name smolvla_pick
+
+# Step 3: Evaluation (~4 min, GPU render)
+python scripts/03_eval.py \
+  --policy-type smolvla \
+  --checkpoint output/train/smolvla_pick/final \
+  --dataset-id local/franka-genesis-pick-100ep \
+  --n-episodes 20 --seed 99 --record-video
+```
+
+### Reference Timings
+
+| Step | R9700 (RDNA4) | W7900D (RDNA3.5) |
+|---|---|---|
+| Data Gen (100 ep) | ~23 min | **~15 min** |
+| Training (4000 steps, batch 4) | ~7.4 min (0.11 s/step) | ~10.6 min (0.15 s/step) |
+| Evaluation (20 ep, GPU render) | ~4 min | ~4 min |
+| **Total** | **~35 min** | **~30 min** |
+
+### Reference Results
+
+| Metric | R9700 (RDNA4) | W7900D (RDNA3.5) |
+|---|:---:|:---:|
+| Data gen success | 100% | 100% |
+| Loss (start → end) | 0.671 → 0.016 | 0.67 → 0.008 |
+| Peak VRAM | 2.33 GB | 2.27 GB |
+| Eval success rate (GPU render) | 48% (kitchen scene) | 80% (flat scene) |
+
+> Note: R9700 uses kitchen+wrist scene; W7900 uses flat plane + up/side scene. Results are not directly comparable.
 
 ---
 
@@ -42,30 +123,17 @@ The training dataset is pre-generated on RDNA4 and published on [HuggingFace](ht
 
 ## Teacher / Admin Setup
 
-> **This section is for instructors and cluster admins only.** Students skip straight to [Student Quick Start](#student-quick-start).
+> **This section is for instructors and cluster admins only.** Students skip to [Path A](#path-a-cdna3-mi300mi325--pre-built-dataset) or [Path B](#path-b-rdna435-r9700--w7900--end-to-end).
 
-On each GPU node, run once before the workshop:
+### Common Steps
 
 ```bash
 git clone git@github.com:<org>/Robot_synthetic_data_generation_workshop.git
 cd Robot_synthetic_data_generation_workshop
-
-# 1. Build the Docker image (~40 min, includes deps + Taichi cache + model/dataset)
-bash docker/build.sh                    # → workshop-genesis:latest
-
-# 2. (Optional) Pre-download HF assets to host — useful if bind-mounts shadow the image cache
-export HF_CACHE=/data/hf_cache          # local SSD or shared NFS mount
-mkdir -p $HF_CACHE
-HF_HOME=$HF_CACHE python -c "
-from huggingface_hub import snapshot_download
-snapshot_download('lerobot/smolvla_base')
-snapshot_download('lidavidsh/franka-pick-kitchen-up-wrist-100ep-genesis', repo_type='dataset')
-"
+bash docker/build.sh    # → workshop-genesis:latest (~40 min)
 ```
 
-The Docker image bakes in all Python deps, torchcodec (CPU-only), SmolVLA base model, HF dataset, and pre-compiled Taichi kernels. Step 2 is only needed when bind-mounts shadow the image's internal cache. For multi-node clusters, repeat on each node or point `HF_CACHE` at a shared NFS/Lustre path.
-
-### Launch the container
+### MI300/MI325 (CDNA3) Container
 
 ```bash
 docker run --rm -it \
@@ -73,13 +141,33 @@ docker run --rm -it \
   --network=host \
   -v $(pwd):/workspace/workshop \
   -v ${HF_CACHE}:/root/.cache/huggingface \
-  -e HF_HUB_OFFLINE=1 \
+  -e HF_HUB_OFFLINE=1 -e HSA_OVERRIDE_GFX_VERSION=9.4.2 \
   -w /workspace/workshop \
-  workshop-genesis:latest \
-  bash
+  workshop-genesis:latest bash
 ```
 
-> On CDNA3 (MI325/MI300) nodes, add `-e HSA_OVERRIDE_GFX_VERSION=9.4.2`. RDNA4 does not need this.
+### RDNA4/3.5 (R9700 / W7900) Container
+
+```bash
+IMAGE=workshop-genesis:rocm7.2_w7900_ready
+
+docker run --rm -it \
+  --device=/dev/kfd --device=/dev/dri --group-add video --ipc=host \
+  --network=host \
+  -v $(pwd):/workspace/workshop \
+  -w /workspace/workshop \
+  $IMAGE bash
+```
+
+> For nodes with unstable external network, download model weights via [ModelScope](https://modelscope.cn):
+> ```bash
+> pip install modelscope
+> python -c "
+> from modelscope import snapshot_download
+> snapshot_download('lerobot/smolvla_base', cache_dir='/root/.cache/huggingface/hub')
+> snapshot_download('HuggingFaceTB/SmolVLM2-500M-Video-Instruct', cache_dir='/root/.cache/huggingface/hub')
+> "
+> ```
 
 ### Start Jupyter
 
@@ -87,7 +175,7 @@ docker run --rm -it \
 jupyter notebook --ip=0.0.0.0 --port=8888 --no-browser --allow-root
 ```
 
-Students access the notebook via [notebooks.amd.com](https://notebooks.amd.com). All outputs are written to `output/` under the workshop directory, visible in the Jupyter file browser.
+Students access the notebook via [notebooks.amd.com](https://notebooks.amd.com). All outputs are written to `output/` under the workshop directory.
 
 <details>
 <summary><b>Alternative base images</b></summary>
@@ -137,30 +225,24 @@ Or run `bash fix_and_run.sh` to do everything in one shot.
 
 ---
 
-## Student Quick Start
+## Notebooks
 
-1. Go to [notebooks.amd.com](https://notebooks.amd.com) and log in
-2. Open `workshop_pipeline.ipynb`
-3. Run cells in order — everything is pre-installed
+| Notebook | Target Hardware | Description |
+|----------|----------------|-------------|
+| `workshop_cdna3.ipynb` | MI300/MI325 (CDNA3) | Uses HF pre-built dataset, CPU render eval |
+| `workshop_rdna.ipynb` | R9700 / W7900 (RDNA4/3.5) | End-to-end pipeline, GPU render |
+
+### Content Overview
+
+| Section | Path A: `workshop_cdna3.ipynb` | Path B: `workshop_rdna.ipynb` |
+|---------|------|------|
+| **0. Environment Setup** | GPU detection + HF dataset pull | GPU detection |
+| **1. Data Generation** | 2-3 ep demo (illustrative only) | **100 ep full generation (~15 min)** |
+| **2. VLA Training** | SmolVLA post-training (~10 min) | SmolVLA post-training (~7-11 min) |
+| **3. Evaluation** | CPU-render closed-loop eval (~10 min) | GPU-render closed-loop eval (~4 min) |
+| **4. Summary** | PNG / MP4 / JSON | PNG / MP4 / JSON |
 
 All outputs (checkpoints, plots, eval videos) are written to `output/` in the file browser.
-
----
-
-## Notebook Overview
-
-| Section | Content | Output |
-|---------|---------|--------|
-| **0. Environment Setup** | GPU detection, dependency check, kitchen asset download, HF dataset pull | Environment ready, dataset cached |
-| **1. Data Generation (demo)** | 2-3 episode IK trajectory demo to illustrate the data pipeline (not a full run — the 100-episode dataset is pulled from HuggingFace) | Sample dataset + camera / trajectory visualizations |
-| **2. VLA Training** | SmolVLA post-training on the HF `kitchen-up-wrist` dataset, frozen vision encoder | Checkpoint + loss curve |
-| **3. Evaluation** | Closed-loop sim eval in the kitchen scene (see [Appendix A](#appendix-a-rendering-backend--cdna3-vs-rdna4) for CPU-render bias) | Success rate + videos |
-| **4. Summary** | Artifact collection and inline display | PNG / MP4 / JSON |
-
-Each section includes:
-- **Background** — why this step matters and the underlying technical principles
-- **Executable code** — run cells directly
-- **Embedded visualizations** — pre-generated images plus live matplotlib plots at runtime
 
 ---
 
@@ -170,7 +252,8 @@ Each section includes:
 robot_synthetic_data_generation_workshop/
 ├── README.md                        ← this file (English)
 ├── README-cn.md                     ← Chinese version
-├── workshop_pipeline.ipynb          ← ★ Jupyter Notebook (workshop main body)
+├── workshop_cdna3.ipynb             ← Jupyter Notebook (CDNA3 path: MI300/MI325)
+├── workshop_rdna.ipynb              ← ★ Jupyter Notebook (RDNA path: R9700/W7900, end-to-end)
 ├── fix_and_run.sh                   ← one-shot: install deps + ROCm patches + run notebook
 ├── setup_torchcodec.sh              ← build torchcodec v0.10.0 CPU-only for ROCm
 ├── docker/
