@@ -7,16 +7,16 @@ End-to-end pipeline for robot manipulation on **AMD GPUs (ROCm)**: **Synthetic D
 Verified on **CDNA3 (MI300/MI325 series)**, **RDNA4 (Radeon AI PRO R9700)**, and **RDNA3.5 (Radeon PRO W7900)**.
 
 ```
-┌──────────────────────────┐     ┌─────────────────────┐     ┌─────────────────────┐
-│ 01_gen_data.py (default) │     │  02_train_vla.py     │     │  03_eval.py          │
-│   flat plane + cube      │     │                      │     │                      │
-│ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─│────▶│  SmolVLA fine-tune   │────▶│  Closed-loop eval    │
-│ 02_gen_data_custom_scene │     │  on LeRobot dataset  │     │  in Genesis sim      │
-│   kitchen GLB + anchors  │     │  HF checkpoint out   │     │  success rate + video│
-└──────────────────────────┘     └─────────────────────┘     └─────────────────────┘
-     Franka 7-DOF                     lerobot/smolvla_base       render → VLA → PD
-     pick red cube                    freeze vision encoder      action chunking
-     2 cameras (up/side)              train expert + state_proj  randomized cube pos
+┌──────────────────────────────┐  ┌─────────────────────┐  ┌──────────────────────────┐
+│ 02_gen_data_custom_scene.py   │  │  02_train_vla.py     │  │  04_eval_custom_scene.py  │
+│   kitchen GLB + floor_origin  │  │                      │  │                           │
+│   up + wrist cameras          │─▶│  SmolVLA fine-tune   │─▶│  Closed-loop eval         │
+│   100 episodes, GPU render    │  │  on LeRobot dataset  │  │  in Genesis kitchen sim   │
+│                               │  │  HF checkpoint out   │  │  success rate + video     │
+└──────────────────────────────┘  └─────────────────────┘  └──────────────────────────┘
+     Franka 7-DOF                      lerobot/smolvla_base       render → VLA → PD
+     pick red cube                     freeze vision encoder      action chunking
+     2 cameras (up/wrist)              train expert + state_proj  randomized cube pos
 ```
 
 ---
@@ -25,7 +25,7 @@ Verified on **CDNA3 (MI300/MI325 series)**, **RDNA4 (Radeon AI PRO R9700)**, and
 
 | | Path A: CDNA3 (MI300/MI325) | Path B: RDNA4/3.5 (R9700 / W7900) |
 |---|---|---|
-| **Data Generation** | Skip — use pre-built HuggingFace dataset | **End-to-end** `01_gen_data.py` (100 episodes) |
+| **Data Generation** | Skip — use pre-built HuggingFace dataset | **End-to-end** `02_gen_data_custom_scene.py` kitchen scene (100 episodes) |
 | **Training** | Local training | Local training |
 | **Evaluation** | CPU render (llvmpipe), ~20 pt lower success rate | GPU render (radeonsi), benchmark-quality |
 | **Total time** | ~20 min (train + eval) | **~30 min** (gen + train + eval) |
@@ -64,21 +64,29 @@ SmolVLA models are downloaded from [ModelScope](https://modelscope.cn) (China-fr
 ```bash
 docker exec -it workshop-genesis bash
 
-# Step 1: Data Generation (~15 min)
-python scripts/01_gen_data.py --n-episodes 100 --repo-id local/franka-genesis-pick-100ep
+# Step 0: Download kitchen scene assets (~130 MB, first time only)
+python scripts/00_download_kitchen.py --mesh-only
+
+# Step 1: Data Generation — kitchen scene + up/wrist cameras (~15-24 min)
+python scripts/02_gen_data_custom_scene.py \
+  --scene rustic_kitchen --anchor floor_origin \
+  --camera-layout up_wrist \
+  --n-episodes 100 --seed 42 \
+  --repo-id local/franka-kitchen-wrist-100ep
 
 # Step 2: Training (~7-11 min)
 python scripts/02_train_vla.py \
-  --dataset-id local/franka-genesis-pick-100ep \
+  --dataset-id local/franka-kitchen-wrist-100ep \
   --pretrained lerobot/smolvla_base \
   --n-steps 4000 --batch-size 4 --num-workers 4 \
-  --run-name smolvla_pick
+  --run-name smolvla_kitchen_wrist
 
-# Step 3: Evaluation (~4 min, GPU render)
-python scripts/03_eval.py \
-  --policy-type smolvla \
-  --checkpoint output/train/smolvla_pick/final \
-  --dataset-id local/franka-genesis-pick-100ep \
+# Step 3: Evaluation — kitchen scene (~4 min, GPU render)
+python scripts/04_eval_custom_scene.py \
+  --checkpoint output/train/smolvla_kitchen_wrist/final \
+  --dataset-id local/franka-kitchen-wrist-100ep \
+  --scene rustic_kitchen --anchor floor_origin \
+  --camera-layout up_wrist \
   --n-episodes 20 --seed 99 --record-video
 ```
 
@@ -86,21 +94,21 @@ python scripts/03_eval.py \
 
 | Step | R9700 (RDNA4) | W7900D (RDNA3.5) |
 |---|---|---|
-| Data Gen (100 ep) | ~23 min | **~15 min** |
+| Data Gen (100 ep, kitchen) | ~23 min | ~24 min |
 | Training (4000 steps, batch 4) | ~7.4 min (0.11 s/step) | ~10.6 min (0.15 s/step) |
 | Evaluation (20 ep, GPU render) | ~4 min | ~4 min |
-| **Total** | **~35 min** | **~30 min** |
+| **Total** | **~35 min** | **~39 min** |
 
-### Reference Results
+### Reference Results (kitchen+wrist scene, directly comparable)
 
 | Metric | R9700 (RDNA4) | W7900D (RDNA3.5) |
 |---|:---:|:---:|
 | Data gen success | 100% | 100% |
-| Loss (start → end) | 0.671 → 0.016 | 0.67 → 0.008 |
+| Loss (start → end) | 0.671 → 0.016 | 0.67 → 0.014 |
 | Peak VRAM | 2.33 GB | 2.27 GB |
-| Eval success rate (GPU render) | 48% (kitchen scene) | 80% (flat scene) |
+| Eval success rate (GPU render, kitchen) | **~48%** | **~12%** (3 seeds pooled) |
 
-> Note: R9700 uses kitchen+wrist scene; W7900 uses flat plane + up/side scene. Results are not directly comparable.
+> Note: Both GPUs use the same kitchen+wrist scene — results are directly comparable. W7900 eval success rate is significantly lower than R9700 despite similar training loss convergence. The gap likely stems from ROCm driver version differences (7.0.2 vs 7.2) or RDNA3.5/RDNA4 rendering differences.
 
 ---
 
@@ -236,8 +244,8 @@ Or run `bash fix_and_run.sh` to do everything in one shot.
 
 | Section | Path A: `workshop_cdna3.ipynb` | Path B: `workshop_rdna.ipynb` |
 |---------|------|------|
-| **0. Environment Setup** | GPU detection + HF dataset pull | GPU detection |
-| **1. Data Generation** | 2-3 ep demo (illustrative only) | **100 ep full generation (~15 min)** |
+| **0. Environment Setup** | GPU detection + HF dataset pull | GPU detection + kitchen GLB download |
+| **1. Data Generation** | 2-3 ep demo (illustrative only) | **100 ep kitchen scene generation (~15-24 min)** |
 | **2. VLA Training** | SmolVLA post-training (~10 min) | SmolVLA post-training (~7-11 min) |
 | **3. Evaluation** | CPU-render closed-loop eval (~10 min) | GPU-render closed-loop eval (~4 min) |
 | **4. Summary** | PNG / MP4 / JSON | PNG / MP4 / JSON |

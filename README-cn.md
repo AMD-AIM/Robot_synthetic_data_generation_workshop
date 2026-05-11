@@ -7,16 +7,16 @@
 已在 **CDNA3 (MI300/MI325)**、**RDNA4 (R9700)** 和 **RDNA3.5 (W7900)** 上验证。
 
 ```
-┌──────────────────────────┐     ┌─────────────────────┐     ┌─────────────────────┐
-│ 01_gen_data.py (default) │     │  02_train_vla.py     │     │  03_eval.py          │
-│   flat plane + cube      │     │                      │     │                      │
-│ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─│────▶│  SmolVLA fine-tune   │────▶│  Closed-loop eval    │
-│ 02_gen_data_custom_scene │     │  on LeRobot dataset  │     │  in Genesis sim      │
-│   kitchen GLB + anchors  │     │  HF checkpoint out   │     │  success rate + video│
-└──────────────────────────┘     └─────────────────────┘     └─────────────────────┘
-     Franka 7-DOF                     lerobot/smolvla_base       render → VLA → PD
-     pick red cube                    freeze vision encoder      action chunking
-     2 cameras (up/side)              train expert + state_proj  randomized cube pos
+┌──────────────────────────────┐  ┌─────────────────────┐  ┌──────────────────────────┐
+│ 02_gen_data_custom_scene.py   │  │  02_train_vla.py     │  │  04_eval_custom_scene.py  │
+│   kitchen GLB + floor_origin  │  │                      │  │                           │
+│   up + wrist cameras          │─▶│  SmolVLA fine-tune   │─▶│  Closed-loop eval         │
+│   100 episodes, GPU render    │  │  on LeRobot dataset  │  │  in Genesis kitchen sim   │
+│                               │  │  HF checkpoint out   │  │  success rate + video     │
+└──────────────────────────────┘  └─────────────────────┘  └──────────────────────────┘
+     Franka 7-DOF                      lerobot/smolvla_base       render → VLA → PD
+     pick red cube                     freeze vision encoder      action chunking
+     2 cameras (up/wrist)              train expert + state_proj  randomized cube pos
 ```
 
 ---
@@ -27,7 +27,7 @@
 
 | | 路径 A: CDNA3 (MI300/MI325) | 路径 B: RDNA4/3.5 (R9700 / W7900) |
 |---|---|---|
-| **数据生成** | 跳过，使用 HuggingFace 预构建数据集 | **端到端执行** `01_gen_data.py` 生成 100 集 |
+| **数据生成** | 跳过，使用 HuggingFace 预构建数据集 | **端到端执行** `02_gen_data_custom_scene.py` kitchen 场景生成 100 集 |
 | **训练** | 本地训练 | 本地训练 |
 | **评估** | CPU 渲染 (llvmpipe)，成功率偏低 ~20pt | GPU 渲染 (radeonsi)，benchmark 级结果 |
 | **总耗时** | ~20 min (训练 + 评估) | **~30 min** (数据生成 + 训练 + 评估) |
@@ -105,21 +105,29 @@ SmolVLA 模型通过 [ModelScope（魔塔社区）](https://modelscope.cn) 下�
 ```bash
 docker exec -it workshop-genesis bash
 
-# Step 1: 数据生成 (~15 min)
-python scripts/01_gen_data.py --n-episodes 100 --repo-id local/franka-genesis-pick-100ep
+# Step 0: 下载厨房场景资源 (~130 MB, 首次运行)
+python scripts/00_download_kitchen.py --mesh-only
+
+# Step 1: 数据生成 — 厨房场景 + up/wrist 相机 (~15-24 min)
+python scripts/02_gen_data_custom_scene.py \
+  --scene rustic_kitchen --anchor floor_origin \
+  --camera-layout up_wrist \
+  --n-episodes 100 --seed 42 \
+  --repo-id local/franka-kitchen-wrist-100ep
 
 # Step 2: 训练 (~7-11 min)
 python scripts/02_train_vla.py \
-  --dataset-id local/franka-genesis-pick-100ep \
+  --dataset-id local/franka-kitchen-wrist-100ep \
   --pretrained lerobot/smolvla_base \
   --n-steps 4000 --batch-size 4 --num-workers 4 \
-  --run-name smolvla_pick
+  --run-name smolvla_kitchen_wrist
 
-# Step 3: 评估 (~4 min, GPU 渲染)
-python scripts/03_eval.py \
-  --policy-type smolvla \
-  --checkpoint output/train/smolvla_pick/final \
-  --dataset-id local/franka-genesis-pick-100ep \
+# Step 3: 评估 — 厨房场景 (~4 min, GPU 渲染)
+python scripts/04_eval_custom_scene.py \
+  --checkpoint output/train/smolvla_kitchen_wrist/final \
+  --dataset-id local/franka-kitchen-wrist-100ep \
+  --scene rustic_kitchen --anchor floor_origin \
+  --camera-layout up_wrist \
   --n-episodes 20 --seed 99 --record-video
 ```
 
@@ -127,21 +135,21 @@ python scripts/03_eval.py \
 
 | Step | R9700 (RDNA4) | W7900D (RDNA3.5) |
 |---|---|---|
-| 数据生成 (100 ep) | ~23 min | **~15 min** |
+| 数据生成 (100 ep, kitchen) | ~23 min | ~24 min |
 | 训练 (4000 steps, batch 4) | ~7.4 min (0.11 s/step) | ~10.6 min (0.15 s/step) |
 | 评估 (20 ep, GPU render) | ~4 min | ~4 min |
-| **合计** | **~35 min** | **~30 min** |
+| **合计** | **~35 min** | **~39 min** |
 
-### 参考结果
+### 参考结果 (kitchen+wrist 场景, 可直接对比)
 
 | 指标 | R9700 (RDNA4) | W7900D (RDNA3.5) |
 |---|:---:|:---:|
 | 数据生成成功率 | 100% | 100% |
-| Loss (start → end) | 0.671 → 0.016 | 0.67 → 0.008 |
+| Loss (start → end) | 0.671 → 0.016 | 0.67 → 0.014 |
 | Peak VRAM | 2.33 GB | 2.27 GB |
-| Eval 成功率 (GPU render) | 48% (kitchen scene) | 85% (flat scene) |
+| Eval 成功率 (GPU render, kitchen) | **~48%** | **~12%** (3 seeds pooled) |
 
-> Note: R9700 使用 kitchen+wrist 场景，W7900 使用 flat plane + up/side 场景，评估结果不可直接对比。
+> Note: 两卡均使用 kitchen+wrist 场景，结果可直接对比。W7900 eval 成功率显著低于 R9700，训练 loss 收敛一致，差异可能来自 ROCm driver 版本 (7.0.2 vs 7.2) 或 RDNA3.5/RDNA4 渲染差异。
 
 ---
 
@@ -149,13 +157,13 @@ python scripts/03_eval.py \
 
 | 项目 | 值 |
 |---|---|
-| 场景 | Franka Panda 抓取红色方块 |
-| 相机配置 | `up`（俯视）+ `side`（侧视 / 腕部），640×480 |
+| 场景 | Rustic Kitchen (GLB mesh) + Franka Panda 抓取红色方块 |
+| 相机配置 | `up`（俯视）+ `wrist`（腕部 eye-in-hand），640×480 |
 | 集数 / 帧数 | 100 / 13,500 |
 | 大小 | ~200 MB（AV1 视频，LeRobot v3.0） |
 | 动作空间 | 9-DoF 关节位置（7 臂 + 2 指） |
 
-路径 A 从 HuggingFace 下载预构建数据集；路径 B 使用 `01_gen_data.py` 实时生成。
+路径 A 从 HuggingFace 下载预构建数据集；路径 B 使用 `02_gen_data_custom_scene.py` 在 kitchen 场景中实时生成。
 
 ---
 
@@ -227,8 +235,8 @@ jupyter notebook --ip=0.0.0.0 --port=8888 --no-browser --allow-root
 
 | 章节 | 路径 A: `workshop_cdna3.ipynb` | 路径 B: `workshop_rdna.ipynb` |
 |------|------|------|
-| **0. 环境配置** | GPU 检测 + HF 数据集拉取 | GPU 检测 |
-| **1. 数据生成** | 2-3 集 demo（展示数据结构） | **100 集全量生成 (~15 min)** |
+| **0. 环境配置** | GPU 检测 + HF 数据集拉取 | GPU 检测 + 下载厨房 GLB 资源 |
+| **1. 数据生成** | 2-3 集 demo（展示数据结构） | **100 集 kitchen 场景生成 (~15-24 min)** |
 | **2. VLA 训练** | SmolVLA post-training (~10 min) | SmolVLA post-training (~7-11 min) |
 | **3. 仿真评估** | CPU 渲染闭环评估 (~10 min) | GPU 渲染闭环评估 (~4 min) |
 | **4. 结果汇总** | PNG / MP4 / JSON | PNG / MP4 / JSON |
