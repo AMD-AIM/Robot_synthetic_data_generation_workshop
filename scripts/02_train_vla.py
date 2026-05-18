@@ -41,8 +41,11 @@ def main():
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--lr", type=float, default=None, help="Override learning rate")
     ap.add_argument("--output-dir", default="./output")
-    ap.add_argument("--run-name", default="smolvla_pick",
-                    help="Subfolder under output-dir/train/ for this run")
+    ap.add_argument(
+        "--run-name",
+        default="smolvla_pick",
+        help="Subfolder under output-dir/train/ for this run",
+    )
     ap.add_argument("--log-every", type=int, default=50)
     ap.add_argument("--save-every", type=int, default=500)
     ap.add_argument(
@@ -56,7 +59,7 @@ def main():
         type=int,
         default=None,
         help="Seed for torch / numpy / random (affects weight init, shuffling, dropout). "
-             "Omit for non-deterministic run (prior default behaviour).",
+        "Omit for non-deterministic run (prior default behaviour).",
     )
     args = ap.parse_args()
 
@@ -73,18 +76,26 @@ def main():
     if torch.cuda.is_available():
         for i in range(torch.cuda.device_count()):
             props = torch.cuda.get_device_properties(i)
-            print(f"  GPU[{i}]: {props.name}  VRAM: {props.total_memory / 1024**3:.1f} GB")
+            print(
+                f"  GPU[{i}]: {props.name}  VRAM: {props.total_memory / 1024**3:.1f} GB"
+            )
 
     try:
         from lerobot.configs.types import FeatureType
-        from lerobot.common.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
+        from lerobot.common.datasets.lerobot_dataset import (
+            LeRobotDataset,
+            LeRobotDatasetMetadata,
+        )
         from lerobot.common.datasets.utils import dataset_to_policy_features
         from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
         from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
         from lerobot.policies.factory import make_pre_post_processors
     except ImportError:
         from lerobot.configs.types import FeatureType
-        from lerobot.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
+        from lerobot.datasets.lerobot_dataset import (
+            LeRobotDataset,
+            LeRobotDatasetMetadata,
+        )
         from lerobot.datasets.utils import dataset_to_policy_features
         from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
         from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
@@ -98,7 +109,9 @@ def main():
     print(f"  fps: {dataset_metadata.fps}")
 
     features = dataset_to_policy_features(dataset_metadata.features)
-    output_features = {k: ft for k, ft in features.items() if ft.type is FeatureType.ACTION}
+    output_features = {
+        k: ft for k, ft in features.items() if ft.type is FeatureType.ACTION
+    }
     input_features = {k: ft for k, ft in features.items() if k not in output_features}
     print(f"  input_features: {list(input_features.keys())}")
     print(f"  output_features: {list(output_features.keys())}")
@@ -115,7 +128,17 @@ def main():
         train_state_proj=True,
     )
 
-    policy = SmolVLAPolicy.from_pretrained(args.pretrained, config=cfg, strict=False)
+    try:
+        policy = SmolVLAPolicy.from_pretrained(
+            args.pretrained, config=cfg, strict=False
+        )
+    except Exception as e:
+        print(f"[train] loading safetensors from local dir")
+        from safetensors.torch import load_file
+
+        policy = SmolVLAPolicy(config=cfg)
+        st = load_file(str(Path(args.pretrained) / "model.safetensors"))
+        policy.load_state_dict(st, strict=False)
     policy.train()
     policy.to(device)
 
@@ -132,7 +155,8 @@ def main():
         print(f"[train] AMP enabled: dtype={amp_dtype}")
 
     preprocessor, postprocessor = make_pre_post_processors(
-        cfg, dataset_stats=dataset_metadata.stats,
+        cfg,
+        dataset_stats=dataset_metadata.stats,
     )
 
     # ---- dataloader ----
@@ -141,16 +165,24 @@ def main():
         "action": make_delta_timestamps(cfg.action_delta_indices, fps),
     }
     for img_key in cfg.image_features:
-        delta_timestamps[img_key] = make_delta_timestamps(cfg.observation_delta_indices, fps)
-    delta_timestamps["observation.state"] = make_delta_timestamps(cfg.observation_delta_indices, fps)
+        delta_timestamps[img_key] = make_delta_timestamps(
+            cfg.observation_delta_indices, fps
+        )
+    delta_timestamps["observation.state"] = make_delta_timestamps(
+        cfg.observation_delta_indices, fps
+    )
 
     dataset = LeRobotDataset(
         args.dataset_id,
         delta_timestamps=delta_timestamps,
     )
     dataloader = torch.utils.data.DataLoader(
-        dataset, batch_size=args.batch_size, shuffle=True,
-        num_workers=args.num_workers, pin_memory=torch.cuda.is_available(), drop_last=True,
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,
+        pin_memory=torch.cuda.is_available(),
+        drop_last=True,
     )
     print(
         f"\n[train] dataloader: {len(dataset)} samples, "
@@ -161,8 +193,10 @@ def main():
     trainable = [p for p in policy.parameters() if p.requires_grad]
     lr = args.lr if args.lr is not None else cfg.optimizer_lr
     optimizer = torch.optim.AdamW(
-        trainable, lr=lr,
-        betas=cfg.optimizer_betas, eps=cfg.optimizer_eps,
+        trainable,
+        lr=lr,
+        betas=cfg.optimizer_betas,
+        eps=cfg.optimizer_eps,
         weight_decay=cfg.optimizer_weight_decay,
     )
     print(f"[train] optimizer: AdamW lr={lr}")
@@ -186,12 +220,16 @@ def main():
             t0 = time.time()
             batch = preprocessor(batch)
 
-            with torch.autocast(device_type="cuda", dtype=amp_dtype, enabled=amp_enabled):
+            with torch.autocast(
+                device_type="cuda", dtype=amp_dtype, enabled=amp_enabled
+            ):
                 loss, info = policy.forward(batch)
 
             loss.backward()
 
-            grad_norm = torch.nn.utils.clip_grad_norm_(trainable, cfg.optimizer_grad_clip_norm)
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                trainable, cfg.optimizer_grad_clip_norm
+            )
             optimizer.step()
             optimizer.zero_grad()
             step_time = time.time() - t0
@@ -201,7 +239,11 @@ def main():
                 "step": step,
                 "epoch": epoch,
                 "loss": float(loss.item()),
-                "grad_norm": float(grad_norm.item()) if hasattr(grad_norm, "item") else float(grad_norm),
+                "grad_norm": (
+                    float(grad_norm.item())
+                    if hasattr(grad_norm, "item")
+                    else float(grad_norm)
+                ),
                 "lr": float(current_lr),
                 "step_time_s": float(step_time),
             }
@@ -264,7 +306,9 @@ def main():
         json.dumps(metrics_log, indent=2), encoding="utf-8"
     )
     print(f"  metrics saved: {save_dir / 'train_summary.json'}")
-    print(f"  per-step log: {save_dir / 'train_metrics.json'} ({len(metrics_log)} records)")
+    print(
+        f"  per-step log: {save_dir / 'train_metrics.json'} ({len(metrics_log)} records)"
+    )
 
 
 if __name__ == "__main__":

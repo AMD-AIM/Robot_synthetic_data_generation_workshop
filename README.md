@@ -77,7 +77,7 @@ python scripts/02_gen_data_custom_scene.py \
 # Step 2: Training (~7-11 min)
 python scripts/02_train_vla.py \
   --dataset-id local/franka-kitchen-wrist-100ep \
-  --pretrained lerobot/smolvla_base \
+  --pretrained /opt/workshop/models/smolvla_base \
   --n-steps 4000 --batch-size 4 --num-workers 4 \
   --run-name smolvla_kitchen_wrist
 
@@ -167,13 +167,13 @@ docker run --rm -it \
   $IMAGE bash
 ```
 
-> For nodes with unstable external network, download model weights via [ModelScope](https://modelscope.cn):
+> For nodes with unstable external network, download model weights via [ModelScope](https://modelscope.cn) to `/opt/workshop/models/`:
 > ```bash
 > pip install modelscope
 > python -c "
 > from modelscope import snapshot_download
-> snapshot_download('lerobot/smolvla_base', cache_dir='/root/.cache/huggingface/hub')
-> snapshot_download('HuggingFaceTB/SmolVLM2-500M-Video-Instruct', cache_dir='/root/.cache/huggingface/hub')
+> snapshot_download('lerobot/smolvla_base', local_dir='/opt/workshop/models/smolvla_base')
+> snapshot_download('HuggingFaceTB/SmolVLM2-500M-Video-Instruct', local_dir='/opt/workshop/models/SmolVLM2-500M-Video-Instruct')
 > "
 > ```
 
